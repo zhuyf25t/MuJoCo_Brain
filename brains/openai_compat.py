@@ -1,7 +1,7 @@
 """OpenAI 兼容 API Brain (httpx 直连 /chat/completions).
 
 适配 DeepSeek/Qwen/GLM/OpenRouter/vLLM 等一切兼容端点.
-环境变量: LLM_BASE_URL (如 https://api.deepseek.com/v1), LLM_API_KEY, LLM_MODEL.
+项目 .env / 环境变量: LLM_BASE_URL、LLM_API_KEY、LLM_MODEL，亦支持 OPENAI_* 别名。
 """
 
 from __future__ import annotations
@@ -22,18 +22,38 @@ class OpenAICompatBrain(Brain):
 
     def __init__(self, base_url: str | None = None, api_key: str | None = None,
                  model: str | None = None, transport=None):
-        # 优先级: 显式参数 > 项目 config > 环境变量
+        # 优先级: 显式参数 > 项目本地配置文件 > config 默认值 > 进程环境变量。
         self.base_url = (base_url
                          or config.LLM_BASE_URL
-                         or os.environ.get(config.ENV_OPENAI_BASE, "")).rstrip("/")
+                         or os.environ.get(config.ENV_OPENAI_BASE)
+                         or os.environ.get("OPENAI_BASE_URL", "")).rstrip("/")
         self.api_key = (api_key
                         or config.LLM_API_KEY
-                        or os.environ.get(config.ENV_OPENAI_KEY, ""))
+                        or os.environ.get(config.ENV_OPENAI_KEY)
+                        or os.environ.get("OPENAI_API_KEY", ""))
         self.model = (model
                       or config.LLM_MODEL
-                      or os.environ.get(config.ENV_OPENAI_MODEL, ""))
+                      or os.environ.get(config.ENV_OPENAI_MODEL)
+                      or os.environ.get("OPENAI_MODEL", ""))
         if not self.base_url:
-            raise RuntimeError("未配置 LLM 端点: 设 config.LLM_BASE_URL 或环境变量 LLM_BASE_URL")
+            raise RuntimeError("未配置 LLM 端点: 在项目 .env 中设置 OPENAI_BASE_URL 或 LLM_BASE_URL")
+        if not self.model:
+            raise RuntimeError("未配置 LLM 模型: 在项目 .env 中设置 OPENAI_MODEL 或 LLM_MODEL")
+        try:
+            max_tokens = int(config.OPENAI_MAX_TOKENS)
+        except (TypeError, ValueError):
+            raise ValueError("max_tokens 必须是正整数") from None
+        if max_tokens <= 0:
+            raise ValueError("max_tokens 必须是正整数")
+        self._request_options = {"max_tokens": max_tokens, "stream": False}
+        if str(config.OPENAI_STREAM).lower() != "false":
+            raise ValueError("当前 Brain 读取完整 JSON 响应，请在 .env 设置 stream=false")
+        if config.OPENAI_THINKING:
+            if config.OPENAI_THINKING not in ("enabled", "disabled"):
+                raise ValueError("thinking 必须是 enabled 或 disabled")
+            self._request_options["thinking"] = {"type": config.OPENAI_THINKING}
+        if config.OPENAI_REASONING_EFFORT:
+            self._request_options["reasoning_effort"] = config.OPENAI_REASONING_EFFORT
         self._endpoint = None                    # 运行时探测: {base}/chat/completions 或 {base}/v1/chat/completions
         self._client = httpx.Client(timeout=config.LLM_TIMEOUT_S, transport=transport)
 
@@ -54,7 +74,7 @@ class OpenAICompatBrain(Brain):
                 "messages": messages,
                 "tools": tools,
                 "tool_choice": "auto",
-                "max_tokens": config.LLM_MAX_TOKENS}
+                **self._request_options}
         last_err: Exception | None = None
         for attempt in range(retries):
             for url in candidates:

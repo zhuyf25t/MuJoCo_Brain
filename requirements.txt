@@ -13,6 +13,7 @@ scipy==1.18.1
 httpx==0.28.1
 httpx2==2.13.1
 anthropic==1.8.0
+python-dotenv==1.2.3
 
 # JPEG observations and MP4 recording/replay (FFmpeg is a runtime plugin).
 Pillow==12.3.0

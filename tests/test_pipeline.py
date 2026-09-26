@@ -89,7 +89,8 @@ def test_openai_brain_json_fallback():
             "content": '思考中... ```json\n{"thought": "观察", "tool": "look", "args": {}}\n```'
         }}]})
 
-    brain = OpenAICompatBrain(base_url="http://mock/v1", transport=httpx.MockTransport(handler))
+    brain = OpenAICompatBrain(base_url="http://mock/v1", api_key="k", model="mock-model",
+                              transport=httpx.MockTransport(handler))
     dec = brain.decide(_fake_obs(), "任务", _fake_schemas(), [])
     dec = dec[0] if isinstance(dec, list) else dec
     assert dec.tool == "look"
@@ -104,13 +105,15 @@ def test_openai_brain_retry_then_safe_fallback():
         calls["n"] += 1
         return httpx.Response(200, json={"choices": [{"message": {"content": "我不会调用工具"}}]})
 
-    brain = OpenAICompatBrain(base_url="http://mock/v1", transport=httpx.MockTransport(handler))
+    brain = OpenAICompatBrain(base_url="http://mock/v1", api_key="k", model="mock-model",
+                              transport=httpx.MockTransport(handler))
     dec = brain.decide(_fake_obs(), "任务", _fake_schemas(), [])
     dec = dec[0] if isinstance(dec, list) else dec
     assert dec.tool == "forward" and calls["n"] == 2   # 重试一次后安全回退(原地重观察)
 
 
-def test_anthropic_brain_tool_use():
+@pytest.mark.parametrize("finger", [0.0, 0.37, 1.0])
+def test_anthropic_brain_tool_use(finger):
     from brains import AnthropicBrain
 
     class Block:
@@ -125,20 +128,27 @@ def test_anthropic_brain_tool_use():
                          stop_reason="tool_use")
 
     captured: dict = {}
-    brain = AnthropicBrain(api_key="k", model="claude-opus-5")
+    brain = AnthropicBrain(api_key="k", model="claude-opus-5",
+                           base_url="https://mock.invalid")
+    brain.client.close()
     brain.client = type("C", (), {"messages": Msgs()})()
-    dec = brain.decide(_fake_obs(), "任务", _fake_schemas(), [])
+    obs = _fake_obs()
+    obs["finger"] = finger
+    dec = brain.decide(obs, "任务", _fake_schemas(), [])
     assert dec[0].tool == "grasp" and "好的" in dec[0].thought
     # 请求结构: 不带 temperature (新模型不支持), 工具用 input_schema
     assert "temperature" not in captured
     assert captured["tools"][0]["input_schema"]["type"] == "object"
     assert captured["system"] and captured["messages"][0]["role"] == "user"
+    sent_text = "\n".join(part["text"] for part in captured["messages"][0]["content"]
+                          if part["type"] == "text")
+    assert f"夹爪开度={finger:.0%}" in sent_text
 
 
 def _fake_obs():
     import numpy as np
-    return {"images": {"overhead": np.zeros((48, 64, 3), dtype=np.uint8)},
-            "arm_qpos": [0.0] * 7, "gripper": 1.0,
+    return {"images": {"front": np.zeros((48, 64, 3), dtype=np.uint8)},
+            "arm_qpos": [0.0, 0.0], "finger": 1.0, "holding": False,
             "base_pose": [0, 0, 0], "tcp_pos": [0, 0, 0]}
 
 

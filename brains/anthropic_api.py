@@ -63,11 +63,10 @@ class AnthropicBrain(Brain):
             for cam, rgb in obs.get("images", {}).items():
                 content.append({"type": "text", "text": f"相机 {cam} 当前画面:"})
                 content.append(encode_image_block(rgb, fmt="anthropic"))
-            st = obs.get("arm_qpos")
             content.append({"type": "text", "text": (
                 f"任务: {task_text}\n\n当前状态: 底盘位姿="
                 f"{[round(v,3) for v in obs.get('base_pose',[])]}, "
-                f"夹爪开度={obs.get('gripper', 0):.0%}, TCP="
+                f"夹爪开度={obs['finger']:.0%}, TCP="
                 f"{[round(v,3) for v in obs.get('tcp_pos',[])]}\n\n"
                 f"历史动作与结果:\n{history_summary(history)}\n{note}\n"
                 "请决定下一个工具调用。")})

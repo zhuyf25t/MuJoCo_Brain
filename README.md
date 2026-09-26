@@ -259,26 +259,48 @@ WSLg 窗口创建仍依赖系统图形服务；软件 EGL 验证通过不代表 
 
 ## 接入 LLM 大脑
 
-配置优先级: **函数参数 > 项目 config.py > 环境变量**(config 优先于环境变量,
-因为机器上常有给其他工具配的 ANTHROPIC_BASE_URL/AUTH_TOKEN, 不能劫持本项目;
-曾因此把请求发到局域网代理导致 401, 已修复并固化此优先级)。
+端点、密钥和模型的配置优先级：**函数参数 > 项目根目录 `.env` >
+`config.py` 默认值 > 进程环境变量**。项目配置优先，避免其他工具的同名环境变量
+改变本项目使用的端点。程序只读取本项目的 `.env`，不执行文件内容或改写进程环境。
 
-在 `config.py` 底部直接填默认值:
+密钥放在被 Git 忽略的 `.env` 中；不要写进 `config.py`。新建配置可参考
+[`.env.example`](.env.example)，已有 `.env` 时直接使用，避免覆盖。
+例如 DeepSeek 的 OpenAI 兼容接口：
 
-```python
-LLM_BASE_URL = "https://你的中转站"       # OpenAI 兼容端点
-LLM_API_KEY  = "sk-..."
-LLM_MODEL    = "gpt-5.6-luna"            # 需支持视觉+tools
-
-ANTHROPIC_BASE_URL = "https://你的中转站"  # Anthropic 协议 (/v1/messages)
-ANTHROPIC_API_KEY  = "sk-..."
-ANTHROPIC_MODEL_DEFAULT = "claude-sonnet-5"
+```dotenv
+OPENAI_API_KEY=你的密钥
+OPENAI_BASE_URL=https://api.deepseek.com
+OPENAI_MODEL=deepseek-flash
+max_tokens=8192
+thinking=enabled
+reasoning_effort=low
+stream=false
 ```
+
+也支持原有 `LLM_API_KEY`、`LLM_BASE_URL`、`LLM_MODEL` 名称；两组同时存在时
+`LLM_*` 优先。上述可选请求参数从本地配置文件读取，只用于 OpenAI 兼容适配器；
+目标服务需支持 `thinking` 和 `reasoning_effort`，不支持时删掉对应配置。
+当前只支持非流式响应，`stream` 必须为 `false`。`max_tokens` 是回复 token 上限，
+不是每次都会消耗的数量。
+
+Anthropic 适配器使用独立的 `ANTHROPIC_API_KEY`、`ANTHROPIC_BASE_URL`、
+`ANTHROPIC_MODEL` 配置；不会复用 OpenAI 端点或密钥。
 
 ```bash
 python run_collect.py --brain openai      # OpenAI 兼容协议
 python run_collect.py --brain anthropic   # Anthropic 协议(实测走通)
 ```
+
+本机 Windows GUI 已验证可用，PowerShell 中可边运行 DeepSeek 边采集：
+
+```powershell
+cd F:\AstraBel\mujoco
+.\.venv-gui\Scripts\python.exe run_collect.py --brain openai --episodes 1 --gui --keep-open
+```
+
+`openai` 指兼容协议，实际调用的是本地配置文件里的模型。其他机器需要先创建自己的
+Windows 虚拟环境并安装 `requirements.txt`；WSL 的 `.venv` 不能直接用于 Windows。
+新增依赖 `python-dotenv` 用于读取本地配置文件，更新项目后需安装最新依赖。
 
 备注:
 - OpenAI 兼容 Brain 会自动探测 `{base}/chat/completions` 与 `{base}/v1/chat/completions`
@@ -291,7 +313,10 @@ python run_collect.py --brain anthropic   # Anthropic 协议(实测走通)
 两个 Brain 都:原生 tool-use 协议 → 文本 JSON 兜底解析 → 解析失败回喂错误重试 1 次 →
 仍失败安全回退原地重观察;**每轮观测自动内嵌车头相机图像与视觉感知结果**(无单独的
 look 工具);历史以单行摘要传递(不累积历史图);
-decision(含 token/延迟)全量落盘 `decisions.jsonl`。
+工具名、参数、执行反馈和 brain 文本说明写入 `decisions.jsonl`；当前 LLM 文本说明
+最多保留 400 字符。API 的输入/输出 token 用量和请求耗时尚未记录。
+这里的 token 是模型处理内容的计量单位；请求耗时是实际等待 API 的时间，
+与仿真的 `t` 时间不同。
 LLM 输入/输出实时打印到终端,支持 Kitty 图形协议(Ghostty)内联显示相机图像
 (`config.LLM_TERM_IMAGES`)。
 

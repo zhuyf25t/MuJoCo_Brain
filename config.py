@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from dotenv import dotenv_values
+
 # ---- 路径 ----
 PKG_DIR = Path(__file__).resolve().parent
 ROOT = PKG_DIR  # 项目根
@@ -111,16 +113,29 @@ ENV_OPENAI_MODEL = "LLM_MODEL"
 ENV_ANTHROPIC_KEY = "ANTHROPIC_API_KEY"
 ENV_ANTHROPIC_MODEL = "ANTHROPIC_MODEL"
 
-# ---- OpenAI 兼容端点默认值 ----
-LLM_BASE_URL = ""
-LLM_API_KEY = ""
-LLM_MODEL = "glm-5.3-flash"
-ANTHROPIC_MODEL_DEFAULT = "glm-5.3-flash"
+# 只读取本项目 .env，不改写进程环境，不展开其中的 ${...} 或执行 shell。
+# dotenv_values 支持引号、注释与 Windows BOM；密钥不写入已跟踪的源码。
+LOCAL_LLM_FILE = ROOT / ".env"
+_local_llm = dotenv_values(LOCAL_LLM_FILE, encoding="utf-8-sig", interpolate=False)
 
-_llm = globals()
-if "ANTHROPIC_BASE_URL" not in _llm:
-    ANTHROPIC_BASE_URL = LLM_BASE_URL
-    ANTHROPIC_API_KEY = LLM_API_KEY
+
+def _local_setting(*names: str, default=""):
+    return next((_local_llm[n] for n in names if _local_llm.get(n)), default)
+
+
+# ---- OpenAI 兼容端点；本地配置文件优先，default 为源码默认值 ----
+LLM_BASE_URL = _local_setting("LLM_BASE_URL", "OPENAI_BASE_URL")
+LLM_API_KEY = _local_setting("LLM_API_KEY", "OPENAI_API_KEY")
+LLM_MODEL = _local_setting("LLM_MODEL", "OPENAI_MODEL")
+OPENAI_MAX_TOKENS = _local_setting("OPENAI_MAX_TOKENS", "max_tokens", default=LLM_MAX_TOKENS)
+OPENAI_THINKING = _local_setting("OPENAI_THINKING", "thinking")
+OPENAI_REASONING_EFFORT = _local_setting("OPENAI_REASONING_EFFORT", "reasoning_effort")
+OPENAI_STREAM = _local_setting("OPENAI_STREAM", "stream", default="false")
+
+# 两类 API 的端点和密钥分别配置，避免把 OpenAI 协议的凭据发到 Anthropic 端点。
+ANTHROPIC_BASE_URL = _local_setting("ANTHROPIC_BASE_URL")
+ANTHROPIC_API_KEY = _local_setting("ANTHROPIC_API_KEY")
+ANTHROPIC_MODEL_DEFAULT = _local_setting("ANTHROPIC_MODEL")
 
 
 def ensure_dirs() -> None:
