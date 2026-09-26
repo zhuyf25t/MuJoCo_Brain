@@ -14,6 +14,7 @@ pytest.importorskip("langgraph.checkpoint.sqlite")
 
 import config
 from brains.langgraph_brain import LangGraphBrain, initial_state
+from brains.langgraph_policy import CALIBRATION_VIEW_PROMPT
 from brains.llm_common import encode_image_block
 from control.tools import ToolLayer
 
@@ -45,6 +46,7 @@ class RequestLog(list):
     def __init__(self):
         super().__init__()
         self.observations = []
+        self.gripper_observations = []
 
 
 def workflow():
@@ -81,16 +83,22 @@ def make_brain(monkeypatch, tmp_path):
         monkeypatch.setattr(config, name, value)
     brains = []
 
-    def create(plans=None, *, db_path=None, raw=False, scenes=None):
+    def create(plans=None, *, db_path=None, raw=False, scenes=None, gripper_scenes=None):
         requests = RequestLog()
         queue = deque(plans) if plans is not None else None
         views = iter(scenes) if scenes is not None else None
+        gripper_views = iter(gripper_scenes) if gripper_scenes is not None else None
 
         def respond(request):
             assert request.url.host == "mock.invalid"
             body = json.loads(request.content)
             name = body["tools"][0]["function"]["name"]
-            if name == "describe_scene":
+            if name == "describe_scene" and body["messages"][0]["content"] == CALIBRATION_VIEW_PROMPT:
+                requests.gripper_observations.append(body)
+                result = next(gripper_views) if gripper_views is not None else scene()
+                if isinstance(result, Exception):
+                    raise result
+            elif name == "describe_scene":
                 requests.observations.append(body)
                 planned_hold = queue[0].get("holding", "empty") if queue else "empty"
                 result = next(views) if views is not None else scene(planned_hold, "candidate" if planned_hold == "held" else "unclear")
@@ -434,6 +442,82 @@ def test_observation_only_receives_current_image_and_reuses_identical_pixels(mak
     assert "TASK" not in json.dumps(observation) and "OLD_TARGET_PRIVATE" not in json.dumps(observation)
     rows = [json.loads(s) for s in (brain.trace_dir / "rounds.jsonl").read_text(encoding="utf-8").splitlines()]
     assert rows[-1]["scene_reused"] and rows[-1]["current_scene"] == rows[0]["current_scene"]
+
+
+def planner_scene(request):
+    return json.loads(request["messages"][1]["content"][-1]["text"].split("：", 1)[1].split("\n", 1)[0])
+
+
+def test_calibration_probe_only_projects_geometry_and_preserves_base_cache(make_brain):
+    base = {**scene("unclear", "blocked"), "gripper": "BASE_SHADOW_IDENTITY", "evidence": "BASE_SHADOW_EVIDENCE"}
+    probe = {**scene("empty", "candidate"), "gripper": "TOP_REAL_JAWS_EMPTY_CLAIM",
+             "ground_balls": [{"center": [.9, .9], "description": "WRONG_PROBE_BALL"}], "evidence": "WRONG_PROBE_RELEASE"}
+    brain, requests = make_brain([plan(action("open_gripper")), plan(holding="unclear"), plan(holding="unclear")],
+                                scenes=[scene(), base], gripper_scenes=[probe])
+    history = []
+    for value in (0, 20, 20):
+        tick(brain, history, value)
+    assert len(requests.observations) == 2 and len(requests.gripper_observations) == 1
+    for request in requests[1:]:
+        projected = planner_scene(request)
+        assert projected["gripper"] == probe["gripper"]
+        assert "evidence" not in projected
+        for field in ("ground_balls", "holding", "release_view"):
+            assert projected[field] == base[field]
+    assert brain._scene_cache[1] == base
+    rows = [json.loads(s) for s in (brain.trace_dir / "rounds.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert rows[-1]["current_scene"] == base
+    assert brain.state["visual_memory"]["held"] is None
+
+
+def test_same_pixels_entering_pick_use_unmodified_base_without_new_observation(make_brain):
+    brain, requests = make_brain(workflow()[:5])
+    history = []
+    for value in (0, 20, 40, 60, 60):
+        tick(brain, history, value)
+    assert len(requests.observations) == 4
+    assert len(requests.gripper_observations) == 3
+    assert planner_scene(requests[-1]) == scene()
+    rows = [json.loads(s) for s in (brain.trace_dir / "rounds.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert rows[-1]["scene_reused"] and rows[-1]["calibration_gripper"] is None
+
+
+def test_close_then_open_in_explore_does_not_reenable_initial_geometry_probe(make_brain):
+    brain, requests = make_brain([plan(action("open_gripper")), plan(action("close_gripper")),
+                                 plan(action("open_gripper")), plan()])
+    run_ticks(brain, [], 4)
+    assert len(requests.gripper_observations) == 1
+    assert brain.state["phase"] == "explore"
+    assert planner_scene(requests[-1]) == scene()
+
+
+@pytest.mark.parametrize("probe", [{}, scene("held"), scene("unclear")])
+def test_unaccepted_geometry_probe_leaves_valid_base_scene_usable(probe, make_brain):
+    brain, requests = make_brain([plan(action("open_gripper")), plan(action("shoulder", delta=.1))],
+                                gripper_scenes=[probe])
+    batches = run_ticks(brain, [], 2)
+    assert batches[-1][0].tool == "shoulder"
+    assert planner_scene(requests[-1]) == scene()
+
+
+def test_direct_held_evidence_skips_initial_geometry_probe(make_brain):
+    brain, requests = make_brain([plan(action("open_gripper")), plan(phase="place", holding="held")],
+                                scenes=[scene(), scene("held", "blocked")])
+    run_ticks(brain, [], 2)
+    assert not requests.gripper_observations
+    assert planner_scene(requests[-1]) == scene("held", "blocked")
+
+
+def test_optional_geometry_timeout_preserves_valid_observation_and_planning(make_brain):
+    brain, requests = make_brain([plan(action("open_gripper")), plan(action("shoulder", delta=.1)), plan()],
+                                gripper_scenes=[httpx.ReadTimeout("mock timeout")])
+    history = []
+    for value in (0, 20, 20):
+        tick(brain, history, value)
+    assert len(requests) == 3 and len(requests.gripper_observations) == 1
+    assert planner_scene(requests[1]) == scene()
+    rows = [json.loads(s) for s in (brain.trace_dir / "rounds.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert next(r for r in rows[1]["requests"] if r["kind"] == "calibration_gripper")["error"] == "ReadTimeout"
 
 
 @pytest.mark.parametrize("invalid", [{}, {**scene(), "holding": "possibly"},

@@ -15,6 +15,8 @@ from pathlib import Path
 import time
 from typing import TypedDict
 
+import httpx
+
 try:
     from langgraph.graph import END, START, StateGraph
     from langgraph.runtime import Runtime
@@ -26,7 +28,7 @@ except ModuleNotFoundError as exc:
 
 import config
 from .base import Brain, Decision
-from .langgraph_policy import COMMON_PROMPT, CURRENT_VIEW_PROMPT, STAGE_GOALS, plan_tool, scene_tool
+from .langgraph_policy import CALIBRATION_VIEW_PROMPT, COMMON_PROMPT, CURRENT_VIEW_PROMPT, STAGE_GOALS, plan_tool, scene_tool
 from .llm_common import llm_log, term_show_image
 from .openai_compat import OpenAICompatBrain
 
@@ -62,6 +64,7 @@ class RoundContext:
     requests: list[dict] = field(default_factory=list)
     scene: dict | None = None
     scene_reused: bool = False
+    calibration_gripper: str | None = None
 
 
 class LangGraphBrain(Brain):
@@ -83,6 +86,7 @@ class LangGraphBrain(Brain):
         """The existing collector calls this at each episode; initialize on its first frame."""
         self._fresh, self._round = True, 0
         self._scene_cache = None
+        self._gripper_cache = None
 
     def _start_episode(self):
         self.memory.open()
@@ -231,8 +235,20 @@ class LangGraphBrain(Brain):
         for label, frame in images:
             content.extend([{"type": "text", "text": f"{label}；已调用动作数={frame['history_n']}"},
                             self.memory.image_block(frame)])
+        scene = deepcopy(ctx.scene)
+        geometry_note = ""
+        if ctx.calibration_gripper:
+            scene["gripper"] = ctx.calibration_gripper
+            # The base evidence can repeat its mistaken shadow identity. Keep it
+            # in the trace and release checks, not alongside the revised geometry.
+            scene.pop("evidence")
+            geometry_note = (
+                "本轮初始标定的gripper由另一次结合本车外观说明的看图复核提供，只帮助辨认实体掌/夹块的位置和形态。"
+                "球坐标、holding、release_view仍来自原独立观测，未被复核替换；夹爪描述中提到的空爪或持球不能覆盖这些字段。"
+                "保存姿态仍须核对当前实体与地面，形态复核不是已经到达低位或就绪位的证明。")
         content.append({"type": "text", "text": "current_scene（独立只看最后这张当前图得到；不是历史或动作预测）：" +
-                        json.dumps(ctx.scene, ensure_ascii=False) +
+                        json.dumps(scene, ensure_ascii=False) +
+                        "\n" + geometry_note +
                         "\n先根据这份当前观测说明下一批的目的。历史只用来比较动作效果，不能把旧球位置当成现在。"})
         # Include adjacent goals so a visually confirmed boundary needs no second model call.
         goals = "\n\n".join(f"{name}: {goal}" for name, goal in STAGE_GOALS.items())
@@ -256,6 +272,10 @@ class LangGraphBrain(Brain):
         state = self._consume_batch(state, ctx.commands)
         try:
             self._read_scene(ctx)
+            if (entry_node == "explore" and not state["visual_memory"]["held"] and ctx.scene["holding"] != "held" and
+                    any(c["tool"] == "open_gripper" for c in ctx.commands) and
+                    not any(c["tool"] == "close_gripper" for c in ctx.commands)):
+                self._read_calibration_gripper(ctx)
         except (ValueError, TypeError, KeyError) as exc:
             return self._emit_batch(state, ctx, [{"tool": "observe", "args": {}}],
                                     "当前图观测格式不完整，先保持姿态重新观察", str(exc))
@@ -305,11 +325,28 @@ class LangGraphBrain(Brain):
         if self._scene_cache and self._scene_cache[0] == ctx.frame["image_id"]:
             ctx.scene, ctx.scene_reused = deepcopy(self._scene_cache[1]), True
             return
+        ctx.scene = self._describe_current(ctx, CURRENT_VIEW_PROMPT, "observation")
+        self._scene_cache = (ctx.frame["image_id"], deepcopy(ctx.scene))
+
+    def _read_calibration_gripper(self, ctx):
+        if self._gripper_cache and self._gripper_cache[0] == ctx.frame["image_id"]:
+            ctx.calibration_gripper = self._gripper_cache[1]
+            return
+        try:
+            report = self._describe_current(ctx, CALIBRATION_VIEW_PROMPT, "calibration_gripper")
+        except (ValueError, TypeError, KeyError, httpx.HTTPError):
+            self._gripper_cache = (ctx.frame["image_id"], None)
+            return  # An optional shape reading cannot invalidate a valid base scene.
+        # Never replace holding, release evidence or coordinates with this probe.
+        ctx.calibration_gripper = report["gripper"] if report["holding"] == "empty" else None
+        self._gripper_cache = (ctx.frame["image_id"], ctx.calibration_gripper)
+
+    def _describe_current(self, ctx, prompt, kind):
         images = [["唯一当前图", ctx.frame]]
-        messages = [{"role": "system", "content": CURRENT_VIEW_PROMPT}, {"role": "user", "content": [
+        messages = [{"role": "system", "content": prompt}, {"role": "user", "content": [
             {"type": "text", "text": "只描述这一张当前图，调用describe_scene。"}, self.memory.image_block(ctx.frame)]}]
         tool = scene_tool()
-        request = {"kind": "observation", "messages": self.memory.archive_messages(messages, images), "tools": [tool]}
+        request = {"kind": kind, "messages": self.memory.archive_messages(messages, images), "tools": [tool]}
         ctx.requests.append(request)
         started = time.monotonic()
         try:
@@ -318,8 +355,7 @@ class LangGraphBrain(Brain):
             request.update(reply=msg.get("tool_calls") or msg.get("content"), usage=data.get("usage"))
             scene = self._parse(msg, "describe_scene")
             self._validate_scene(scene)
-            ctx.scene = scene
-            self._scene_cache = (ctx.frame["image_id"], deepcopy(scene))
+            return scene
         except (ValueError, TypeError, KeyError) as exc:
             request["validation_error"] = str(exc)
             raise
@@ -520,9 +556,10 @@ class LangGraphBrain(Brain):
                 raise RuntimeError("图未产生动作批次")
             self._round = ctx.round_no
         finally:
-            self.memory.log({"format_version": 5, "round": ctx.round_no, "model": self.llm.model,
+            self.memory.log({"format_version": 6, "round": ctx.round_no, "model": self.llm.model,
                              "entry_node": ctx.entry_node, "action_phase": self.state.get("phase"),
                              "current_frame": ctx.frame, "current_scene": ctx.scene, "scene_reused": ctx.scene_reused,
+                             "calibration_gripper": ctx.calibration_gripper,
                              "state_before": before, "state_after": self.state,
                              "requests": ctx.requests, "decisions": [asdict(d) for d in ctx.decisions]})
         phase = self.state["phase"]

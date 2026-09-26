@@ -16,6 +16,12 @@ release_view=unclear：没有同时看清球和箱口，或高度、前后关系
 evidence说明你在图中具体看见的关系。只报告可见事实与不确定处，不猜测已执行过什么，也不复述任务目标。
 """
 
+# This variant improved initial jaw identification but regressed holding and ball
+# coordinates in replay. Only its gripper description may inform calibration.
+CALIBRATION_VIEW_PROMPT = CURRENT_VIEW_PROMPT.replace(
+    "夹指按结构辨认：",
+    "相机固定在本车车头，机械臂和夹爪在相机前上方活动。夹爪的横掌加两块短指，在这个视角下可以像一张橙棕色的小桌架或门框；抬起后横掌可能被上沿裁掉，只剩两侧夹块伸入画面。这个外观也可能是本车自己的夹爪，不要只因像桌腿就把它归成环境家具、再去地面影子里找手指。根据可见的掌、夹块及连接确认身份；颜色和所在位置只是线索，不保证任何橙色物体都是夹爪。\n夹指按结构辨认：", 1)
+
 
 def scene_tool():
     return {"type": "function", "function": {"name": "describe_scene",
