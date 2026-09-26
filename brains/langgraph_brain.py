@@ -28,7 +28,8 @@ except ModuleNotFoundError as exc:
 
 import config
 from .base import Brain, Decision
-from .langgraph_policy import CALIBRATION_VIEW_PROMPT, COMMON_PROMPT, CURRENT_VIEW_PROMPT, STAGE_GOALS, plan_tool, scene_tool
+from .langgraph_policy import (CALIBRATION_COMPARE_PROMPT, CALIBRATION_VIEW_PROMPT, COMMON_PROMPT,
+                              CURRENT_VIEW_PROMPT, STAGE_GOALS, plan_tool, scene_tool)
 from .llm_common import llm_log, term_show_image
 from .openai_compat import OpenAICompatBrain
 
@@ -250,10 +251,13 @@ class LangGraphBrain(Brain):
             # in the trace and release checks, not alongside the revised geometry.
             scene.pop("evidence")
             geometry_note = (
-                "本轮初始标定的gripper由另一次结合本车外观说明的看图复核提供，只帮助辨认实体掌/夹块的位置和形态。"
+                "本轮初始标定的gripper由另一次结合本车外观说明的看图复核提供，帮助辨认实体掌/夹块的位置、形态和遮挡。"
+                "其中若有‘与前图比较’，是直接对照上批动作前和现在的实图，不读取动作预期或旧结论；把可见变化与实际指令对应，不把两次粗估坐标的差当成运动。"
                 "球坐标、holding、release_view仍来自原独立观测，未被复核替换；夹爪描述中提到的空爪或持球不能覆盖这些字段。"
                 "保存姿态仍须核对当前实体与地面，形态复核不是已经到达低位或就绪位的证明。")
-        content.append({"type": "text", "text": "current_scene（独立只看最后这张当前图得到；不是历史或动作预测）：" +
+        scene_scope = ("当前图观测；初始gripper复核的来源与比较范围见下文" if ctx.calibration_gripper else
+                       "独立只看最后这张当前图得到；不是历史或动作预测")
+        content.append({"type": "text", "text": f"current_scene（{scene_scope}）：" +
                         json.dumps(scene, ensure_ascii=False) +
                         "\n" + geometry_note +
                         "\n先根据这份当前观测说明下一批的目的。历史只用来比较动作效果，不能把旧球位置当成现在。"})
@@ -282,7 +286,7 @@ class LangGraphBrain(Brain):
             if (entry_node == "explore" and not state["visual_memory"]["held"] and ctx.scene["holding"] != "held" and
                     any(c["tool"] == "open_gripper" for c in ctx.commands) and
                     not any(c["tool"] == "close_gripper" for c in ctx.commands)):
-                self._read_calibration_gripper(ctx)
+                self._read_calibration_gripper(ctx, state)
         except (ValueError, TypeError, KeyError) as exc:
             return self._emit_batch(state, ctx, [{"tool": "observe", "args": {}}],
                                     "当前图观测格式不完整，先保持姿态重新观察", str(exc))
@@ -335,26 +339,44 @@ class LangGraphBrain(Brain):
         ctx.scene = self._describe_current(ctx, CURRENT_VIEW_PROMPT, "observation")
         self._scene_cache = (ctx.frame["image_id"], deepcopy(ctx.scene))
 
-    def _read_calibration_gripper(self, ctx):
-        if self._gripper_cache and self._gripper_cache[0] == ctx.frame["image_id"]:
+    def _read_calibration_gripper(self, ctx, state):
+        previous = state["last_batch"]
+        actions = previous["actions"] if previous else []
+        deltas = [a["args"]["delta"] for a in actions if a["tool"] == "shoulder"]
+        before = None
+        # _consume_batch already matched this complete batch against command history.
+        # Compare the adjacent images, not a pose reference or a predicted result.
+        if (deltas and all(a["tool"] in {"shoulder", "observe"} for a in actions) and
+                (all(d > 0 for d in deltas) or all(d < 0 for d in deltas))):
+            before = previous["before"]
+        cache_key = (before["image_id"] if before else None, ctx.frame["image_id"])
+        if self._gripper_cache and self._gripper_cache[0] == cache_key:
             ctx.calibration_gripper = self._gripper_cache[1]
             return
         try:
-            report = self._describe_current(ctx, CALIBRATION_VIEW_PROMPT, "calibration_gripper")
+            prompt = CALIBRATION_COMPARE_PROMPT if before else CALIBRATION_VIEW_PROMPT
+            report = self._describe_current(ctx, prompt, "calibration_gripper", before=before)
         except (ValueError, TypeError, KeyError, httpx.HTTPError):
-            self._gripper_cache = (ctx.frame["image_id"], None)
+            self._gripper_cache = (cache_key, None)
             return  # An optional shape reading cannot invalidate a valid base scene.
         # Never replace holding, release evidence or coordinates with this probe.
         # A cropped opening can make occupancy unclear while the visible jaws
         # are identifiable. Initial-calibration eligibility is checked by _plan.
         ctx.calibration_gripper = report["gripper"] if report["holding"] in {"empty", "unclear"} else None
-        self._gripper_cache = (ctx.frame["image_id"], ctx.calibration_gripper)
+        self._gripper_cache = (cache_key, ctx.calibration_gripper)
 
-    def _describe_current(self, ctx, prompt, kind):
+    def _describe_current(self, ctx, prompt, kind, *, before=None):
         images = [["唯一当前图", ctx.frame]]
-        messages = [{"role": "system", "content": prompt}, {"role": "user", "content": [
-            {"type": "text", "text": "只描述这一张当前图，调用describe_scene。"}, self.memory.image_block(ctx.frame)]}]
+        content = [{"type": "text", "text": "只描述这一张当前图，调用describe_scene。"}]
+        if before is not None:
+            images.insert(0, ["上批动作前图", before])
+            content = [{"type": "text", "text": "第一张：上批动作之前的实图。"}, self.memory.image_block(before),
+                       {"type": "text", "text": "第二张：唯一当前实图。调用describe_scene；gripper附上与第一张实体夹爪的直接比较。"}]
+        content.append(self.memory.image_block(ctx.frame))
+        messages = [{"role": "system", "content": prompt}, {"role": "user", "content": content}]
         tool = scene_tool()
+        if before is not None:
+            tool["function"]["description"] = "根据第二张当前图片报告物体和空间关系；gripper还需与第一张的同一实体夹爪直接比较，不作动作规划。"
         request = {"kind": kind, "messages": self.memory.archive_messages(messages, images), "tools": [tool]}
         ctx.requests.append(request)
         started = time.monotonic()

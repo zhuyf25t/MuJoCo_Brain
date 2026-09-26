@@ -14,7 +14,7 @@ pytest.importorskip("langgraph.checkpoint.sqlite")
 
 import config
 from brains.langgraph_brain import LangGraphBrain, initial_state
-from brains.langgraph_policy import CALIBRATION_VIEW_PROMPT
+from brains.langgraph_policy import CALIBRATION_COMPARE_PROMPT, CALIBRATION_VIEW_PROMPT
 from brains.llm_common import encode_image_block
 from control.tools import ToolLayer
 
@@ -93,7 +93,7 @@ def make_brain(monkeypatch, tmp_path):
             assert request.url.host == "mock.invalid"
             body = json.loads(request.content)
             name = body["tools"][0]["function"]["name"]
-            if name == "describe_scene" and body["messages"][0]["content"] == CALIBRATION_VIEW_PROMPT:
+            if name == "describe_scene" and body["messages"][0]["content"] in {CALIBRATION_VIEW_PROMPT, CALIBRATION_COMPARE_PROMPT}:
                 requests.gripper_observations.append(body)
                 result = next(gripper_views) if gripper_views is not None else scene()
                 if isinstance(result, Exception):
@@ -546,6 +546,72 @@ def test_calibration_probe_only_projects_geometry_and_preserves_base_cache(probe
     assert brain.state["visual_memory"]["held"] is None
 
 
+def test_initial_shoulder_comparison_uses_adjacent_images_without_predictions(make_brain):
+    base = {**scene("unclear", "blocked"), "gripper": "BASE_GEOMETRY"}
+    probe = {**scene("unclear", "candidate"), "gripper": "CURRENT_GEOMETRY_AND_DIRECT_CHANGE",
+             "ground_balls": [{"center": [.9, .9], "description": "WRONG_PROBE_BALL"}]}
+    plans = [workflow()[0],
+             plan(action("shoulder", delta=-.2), arm_view="grasp", grasp_reference=GRASP),
+             plan(action("shoulder", delta=-.1), action("observe"), action("shoulder", delta=-.1),
+                  learning="OLD_COMPARISON_PRIVATE", expected="EXPECTED_CHANGE_PRIVATE"), plan()]
+    brain, requests = make_brain(plans, scenes=[scene(), scene(), scene(), base],
+                                gripper_scenes=[scene(), scene(), probe])
+    history = []
+    for value in (0, 20, 40, 60):
+        tick(brain, history, value)
+    pair = requests.gripper_observations[-1]
+    assert pair["messages"][0]["content"] == CALIBRATION_COMPARE_PROMPT
+    images = [p for p in pair["messages"][1]["content"] if p["type"] == "image_url"]
+    # The previous batch began at 40; the saved grasp reference is the older 20.
+    assert images == [encode_image_block(obs(v)["images"]["front"], fmt="openai") for v in (40, 60)]
+    payload = json.dumps(pair)
+    for private in ("OLD_COMPARISON_PRIVATE", "EXPECTED_CHANGE_PRIVATE", "PRIVATE_HOLDING", "PRIVATE_RESULT", "TASK"):
+        assert private not in payload
+    assert "delta" not in json.dumps(pair["messages"][1])
+    assert len(requests) == len(requests.observations) == 4
+    assert len(requests.gripper_observations) == 3  # Replaces the probe, adds no request.
+    projected = planner_scene(requests[-1])
+    assert projected["gripper"] == probe["gripper"]
+    for field in ("ground_balls", "holding", "release_view"):
+        assert projected[field] == base[field]
+    assert brain._scene_cache[1] == base and brain.state["visual_memory"]["held"] is None
+    for view, value in zip(requests.observations, (0, 20, 40, 60)):
+        assert [p for p in view["messages"][1]["content"] if p["type"] == "image_url"] == [
+            encode_image_block(obs(value)["images"]["front"], fmt="openai")]
+
+
+def test_initial_comparison_cache_distinguishes_before_image_and_single_view(make_brain):
+    brain, requests = make_brain([plan(action("open_gripper"))] +
+                                [plan(action("shoulder", delta=.1))] * 3 + [plan()])
+    history = []
+    for value in (0, 20, 40, 40, 40):
+        tick(brain, history, value)
+    assert len(requests.observations) == 3  # Base still caches only current pixels.
+    probes = requests.gripper_observations
+    assert len(probes) == 3  # Single 20, pair 20->40, pair 40->40; final pair is reused.
+    for probe, values in zip(probes, ((20,), (20, 40), (40, 40))):
+        assert [p for p in probe["messages"][1]["content"] if p["type"] == "image_url"] == [
+            encode_image_block(obs(v)["images"]["front"], fmt="openai") for v in values]
+    assert brain.state["calibration"]["moves"] == {"to_grasp": None, "to_clearance": None}
+
+
+@pytest.mark.parametrize("actions", [
+    [action("observe")], [action("arm_pose", pose="reach")], [action("elbow", delta=.1)],
+    [action("shoulder", delta=.1), action("forward", seconds=.2)],
+    [action("shoulder", delta=.1), action("elbow", delta=.1)],
+    [action("shoulder", delta=.1), action("shoulder", delta=-.1)],
+])
+def test_initial_comparison_excludes_non_shoulder_or_opposing_batches(actions, make_brain):
+    brain, requests = make_brain([plan(action("open_gripper")), plan(*actions), plan()])
+    history = []
+    for value in (0, 20, 40):
+        tick(brain, history, value)
+    probe = requests.gripper_observations[-1]
+    assert probe["messages"][0]["content"] == CALIBRATION_VIEW_PROMPT
+    assert [p for p in probe["messages"][1]["content"] if p["type"] == "image_url"] == [
+        encode_image_block(obs(40)["images"]["front"], fmt="openai")]
+
+
 def test_same_pixels_entering_pick_use_unmodified_base_without_new_observation(make_brain):
     brain, requests = make_brain(workflow()[:5], gripper_scenes=[scene("unclear")] * 3)
     history = []
@@ -585,15 +651,18 @@ def test_direct_held_evidence_skips_initial_geometry_probe(make_brain):
 
 
 def test_optional_geometry_timeout_preserves_valid_observation_and_planning(make_brain):
-    brain, requests = make_brain([plan(action("open_gripper")), plan(action("shoulder", delta=.1)), plan()],
-                                gripper_scenes=[httpx.ReadTimeout("mock timeout")])
+    brain, requests = make_brain([plan(action("open_gripper")), plan(action("shoulder", delta=.1)),
+                                 plan(action("shoulder", delta=.1)), plan()],
+                                gripper_scenes=[httpx.ReadTimeout("single timeout"), httpx.ReadTimeout("pair timeout")])
     history = []
-    for value in (0, 20, 20):
+    for value in (0, 20, 20, 20):
         tick(brain, history, value)
-    assert len(requests) == 3 and len(requests.gripper_observations) == 1
-    assert planner_scene(requests[1]) == scene()
+    assert len(requests) == 4 and len(requests.gripper_observations) == 2
+    assert all(planner_scene(request) == scene() for request in requests[1:])
     rows = [json.loads(s) for s in (brain.trace_dir / "rounds.jsonl").read_text(encoding="utf-8").splitlines()]
-    assert next(r for r in rows[1]["requests"] if r["kind"] == "calibration_gripper")["error"] == "ReadTimeout"
+    for row in rows[1:3]:
+        assert next(r for r in row["requests"] if r["kind"] == "calibration_gripper")["error"] == "ReadTimeout"
+    assert not any(r["kind"] == "calibration_gripper" for r in rows[-1]["requests"])
 
 
 @pytest.mark.parametrize("invalid", [{}, {**scene(), "holding": "possibly"},
