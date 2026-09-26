@@ -7,9 +7,28 @@ MuJoCo 推进物理模拟并生成新图像，记录器保存决策与轨迹。
 `scripted` 是用于验证流程的规则基线；`openai` 和 `anthropic` 是可替换的 LLM 接口。
 采集过程不训练模型；LeRobot 导出与 ACT 训练属于后续规划。
 
-![MuJoCo_Brain 系统架构](docs/architecture.svg)
+```text
+                                          底层控制循环
+            ┌───────────────────────────────────────────────────────────────────────┐
+            v                                                                       │
+┌──────────────────────┐            ┌──────────────────────┐            ┌───────────┴──────────┐
+│ MuJoCo 仿真          │  观测      │ Brain (统一接口)     │  工具调用  │ ToolLayer            │
+│ 差速小车+两自由度臂  │ -------->  │ scripted             │ -------->  │ forward / back       │
+│ 网球 + 收纳箱        │            │ openai / anthropic   │ <--------  │ turn_left/right ...  │
+└───────────┬──────────┘            └───────────┬──────────┘  工具反馈  └───────────┬──────────┘
+            │ 状态/图像                         │ 决策                              │ 执行结果
+            └───────────────────────────────────┼───────────────────────────────────┘
+                                                v
+                             EpisodeRecorder (决策级 + 控制级 10 Hz)
+                                                │
+                                                v
+                                     data/episodes/ep_XXXX/
+                                                │
+                                                v
+                         GUI 回放 / 视频导出 / (后续: LeRobot v3 -> ACT)
+```
 
-[查看或修改 Mermaid 图源](docs/architecture.mmd)。SVG 在 GitHub 和普通 Markdown 预览中均可直接显示。
+观测 = 车头相机图像 + 状态；工具执行反馈也会交给 Brain，供下一轮决策使用。
 
 **当前任务**: 场地上散落 4 个网球，把任意一个球捡起来放进洋红色收纳箱。
 视觉策略不区分球编号；环境独立检查球是否入箱并基本静止。
@@ -156,6 +175,16 @@ python inspect_data.py --meta ep_0007
 python inspect_data.py --decisions ep_0007
 python inspect_data.py --frame ep_0007 --index 0
 ```
+
+三条命令都只读取已有记录并打印到终端，不运行 brain，也不打开 GUI：
+
+- `--meta ep_0007`：格式化显示本集的 `meta.json`，包括任务、brain 类型、
+  环境成功判定、结束原因、工具调用次数、轨迹帧数和模拟时长。
+- `--decisions ep_0007`：逐条显示 `decisions.jsonl` 中的工具名、参数、
+  brain 说明及工具执行反馈，最后显示环境判定。
+- `--frame ep_0007 --index 0`：显示 `trajectory.jsonl` 的第 0 条记录。
+  索引从 0 开始；输出是模拟时间、位置/姿态、控制量和图片路径等 JSON 数据，
+  不是打开图片，也不是第 0 次 brain 决策。第一条记录不一定在模拟时间 0 秒。
 
 ### 实时演示与历史回放的区别
 
