@@ -1,0 +1,246 @@
+# MuJoCo_Brain
+
+基于 MuJoCo 的机器人智能体实验平台，支持可替换大脑、工具调用与仿真轨迹记录。
+
+把 OpenClaw 的"LLM + 工具 + 环境"范式迁移到机器人:多模态 LLM 作为大脑,
+通过工具调用控制捡球机器人,自动记录 观测/思考/动作/结果 形成数据飞轮,
+后续蒸馏 ACT 等专用模仿学习策略,实现"LLM 兜底通用 → 专用策略沉淀"的
+两阶段自进化闭环。
+
+```
+┌──────────────┐  车头相机图像+状态  ┌────────────────┐  原生 tool-use   ┌────────────────┐
+│ MuJoCo 仿真   │ ───────────→ │ Brain(统一接口) │ ───────────────→ │ ToolLayer       │
+│ 差速小车+两自由│ ←──────────── │ scripted /     │                  │ forward/back   │
+│ 度臂+地面网球 │  底层控制循环  │ openai兼容 /    │                  │ turn_l/r …     │
+└──────────────┘               │ anthropic      │                  └──────┬─────────┘
+     │                         └────────────────┘                         │
+     └──────────── EpisodeRecorder(决策级 + 控制级 10Hz) ←─────────────────┘
+                        → data/episodes/ep_XXXX/ → (导出 LeRobot v3 → 训练 ACT)
+```
+
+**任务**: 场地上散落 4 个网球,把指定编号的球捡起来放进绿色收纳箱
+(机器人/任务形态参照 `mujoco-pzc/MuJoCo` 网球抓取小车)。
+
+## 机器人(参照 mujoco-pzc/MuJoCo 网球抓取小车)
+
+- **底盘**:差速小车,蓝色车身+顶板、参考车式万向脚轮(叉架+滚轮外观);
+  轮位拓扑为"中置双驱动轮承滚转 + 前后脚轮承俯仰"——高重心臂下比参考车的
+  "前驱+单后脚轮"稳定得多(实测前驱单脚轮构型会单轮卸载打滑/翘轮);
+  脚轮碰撞体用各向同性近零摩擦球体(自旋不卡)
+- **机械臂**:参考车形式的两自由度臂(肩俯仰 + 肘俯仰位置舵机)+ 掌部单边滑动指
+  (右指固定,与参考车一致);挂点高 0.30m,臂展 0.06-0.74m,工作面为车头正前方(±7cm)
+- **夹取**:手指闭合 + 球心距 TCP < 0.15m(预筛)且指面与球**有实际接触** → 后端登记
+  "持有"(运动学吸附,物理抓取的仿真等效);张开即释放。对大脑只暴露持有/未持有状态
+- **感知**:`control/perception.py` 颜色比例分割 + 针孔地面投影测距,
+  方位 ±3° / 距离 ±15% (实测);收纳箱为洋红色(场景唯一,杜绝与球影色域冲突)
+- **组合**:`compose_model.py` 用 MjSpec `spec.attach()` 组合底盘与臂
+  (生成 `models/mobile_manip.generated.xml`)
+- **相机**:`front_cam` 装在**车头**(俯角30°,机器人的唯一"眼睛",感知走视觉);
+  `overhead/side` 仅用于录像回放,大脑不可见
+- **控制**:底盘三段式 P 控制(转向→直行→转正,减速度预算回速,受阻检测);
+  臂 2R 解析 IK(双肘分支,先下卷后上翻)+ 二次 IK 修正伺服稳态误差
+
+## 目录结构(控制与仿真分离)
+
+```
+models/                          # 场景/底盘/臂 XML + 生成的组合模型
+hal.py                           # ★ 硬件抽象层: RobotInterface / WorldInterface
+control/                         # ★ 控制逻辑 (零 mujoco 依赖, 可移植真机)
+  kinematics.py                  #   两自由度解析 IK (纯数学)
+  drivers.py                     #   BaseDriver(动作原语) / ArmDriver(预设+微调)
+  tools.py                       #   ToolLayer: LLM 工具集
+  perception.py                  #   车头相机视觉感知(颜色分割+地面投影)
+sim/                             # ★ MuJoCo 仿真后端 (实现 hal 接口)
+  backend.py                     #   MjRobot / MjWorld
+  env.py                         #   MobileManipEnv: 场景组装/reset随机化
+brains/                          # scripted / openai_compat / anthropic
+config.py                        # 全部参数
+compose_model.py                 # 模型组合 (python compose_model.py)
+recorder.py                      # 双层数据记录
+viz.py                           # EGL 相机组 + GUI viewer
+run_collect.py                   # 采集主入口
+run                              # 一键运行 (自举 venv → 生成模型 → 采集)
+inspect_data.py                  # 数据统计 + 回放视频导出
+rerender.py                      # 离线重渲染 (回放 trajectory, 任意相机出片)
+termimg_test.py                  # 终端内联图像(Kitty 协议)自检
+tests/                           # 纯控制层(无mujoco) + 仿真管线 + LLM 协议 mock
+data/episodes/                   # 采集输出
+```
+
+**控制/仿真分离**: `control/` 只 import `hal.py` 与纯数学, 不知道 MuJoCo 的存在
+(tests/test_control_pure.py 用理想 2D 单车"假硬件"跑真实 BaseDriver 验证了这一点)。
+将来接真机: 写一个 `RealRobot`(串口/CAN 发轮速与舵机目标, tick=sleep+回读)
+实现 `RobotInterface`, 控制逻辑、工具层、LLM 大脑全部原样复用。
+仿真专属机制(捡球的"运动学吸附"= 每步写球 qpos)封装在 sim 后端; 真机上由
+物理夹爪天然实现, 接口的 attach/detach 只登记状态。
+
+## 快速开始
+
+使用 **Python 3.12**。根目录 `requirements.txt` 包含当前代码的运行、视频导出和
+测试依赖,固定为此前在 Python 3.12 上通过项目测试的直接依赖版本。
+这不是完整的传递依赖锁文件;安装后可用 `python -m pip check` 检查包依赖冲突。
+
+Ubuntu 24.04 / WSL 首次安装:
+
+```bash
+cd /mnt/f/AstraBel/mujoco    # 按实际项目位置修改
+sudo apt update
+sudo apt install -y python3.12-venv libgl1 libegl1 libglfw3
+python3.12 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+python -m pip check
+```
+
+以后进入项目先执行 `source .venv/bin/activate`。如果 `.venv` 是 Windows 创建的,
+请在 WSL 中另建环境,例如 `python3.12 -m venv ~/.venvs/mujoco`,然后
+`source ~/.venvs/mujoco/bin/activate`;两个系统不能共用同一虚拟环境。
+`./run` 首次自举时也从 `requirements.txt` 安装依赖,但它需要预装 `uv`,
+并固定使用项目根目录的 Linux `.venv`。已有环境更新依赖时,重新执行上面的
+`python -m pip install -r requirements.txt`。
+
+**WSL GUI**: 以下窗口命令使用 WSL 2 的 WSLg 图形支持。在 Windows PowerShell
+运行 `wsl --list --verbose` 确认 `VERSION` 为 `2`;WSL 1 无法直接使用 WSLg。
+已有 Ubuntu 可以原地转换,不需要重装:保存工作并备份重要文件后,在 Windows
+管理员 PowerShell 执行 `wsl --update`,再执行
+`wsl --set-version Ubuntu-24.04 2`（发行版名称以列表为准）。
+参考 [微软 WSL GUI 配置说明](https://learn.microsoft.com/en-us/windows/wsl/tutorials/gui-apps)。
+图形系统和 OpenGL 系统库需要单独配置,不能通过 `requirements.txt` 安装。
+
+```bash
+source .venv/bin/activate    # 或激活自己创建的 WSL 虚拟环境
+
+# 1. 脚本策略采集(无需 API Key,数据飞轮主力)
+python run_collect.py --brain scripted --episodes 10
+
+# 2. 查看数据
+python inspect_data.py
+python inspect_data.py --decisions ep_0000     # 决策日志
+python rerender.py ep_0000 --cams overhead side # 离线重渲染(960x720, 不用重跑)
+
+# 3. GUI 边看边采(WSL 2/WSLg;采集结束时窗口会关闭)
+MUJOCO_GL=glfw python run_collect.py --brain scripted --episodes 1 --gui
+
+# 只查看场景,不运行捡球策略
+MUJOCO_GL=glfw python -m mujoco.viewer --mjcf=models/scene_pickball.xml
+
+# 4. 测试
+MUJOCO_GL=egl python -m pytest tests/ -v
+```
+
+`Pillow` 对应代码中的 `PIL`;`imageio-ffmpeg` 提供导出 MP4 所需的 FFmpeg 后端。
+MuJoCo 会自动安装 Python 的 `glfw` 和 `PyOpenGL` 依赖。
+当前 OpenAI 兼容接口直接使用 `httpx`,Anthropic 接口使用 `anthropic` + `httpx2`;
+`brains/__init__.py` 会导入所有大脑,因此脚本模式也需要这些包。
+当前尚无 LangGraph、PyTorch 或 LeRobot 的实际代码依赖,训练工作流实现后再添加。
+
+## 接入 LLM 大脑
+
+配置优先级: **函数参数 > 项目 config.py > 环境变量**(config 优先于环境变量,
+因为机器上常有给其他工具配的 ANTHROPIC_BASE_URL/AUTH_TOKEN, 不能劫持本项目;
+曾因此把请求发到局域网代理导致 401, 已修复并固化此优先级)。
+
+在 `config.py` 底部直接填默认值:
+
+```python
+LLM_BASE_URL = "https://你的中转站"       # OpenAI 兼容端点
+LLM_API_KEY  = "sk-..."
+LLM_MODEL    = "gpt-5.6-luna"            # 需支持视觉+tools
+
+ANTHROPIC_BASE_URL = "https://你的中转站"  # Anthropic 协议 (/v1/messages)
+ANTHROPIC_API_KEY  = "sk-..."
+ANTHROPIC_MODEL_DEFAULT = "claude-sonnet-5"
+```
+
+```bash
+python run_collect.py --brain openai      # OpenAI 兼容协议
+python run_collect.py --brain anthropic   # Anthropic 协议(实测走通)
+```
+
+备注:
+- OpenAI 兼容 Brain 会自动探测 `{base}/chat/completions` 与 `{base}/v1/chat/completions`
+  (中转站可能任一路由可用), 5xx 自动退避重试
+- Anthropic SDK 默认客户端对部分中转网关返回 401(TLS 指纹类问题), Brain 内已显式
+  构造裸 httpx2 客户端规避; anthropic 1.x 基于 httpx2(非 httpx)
+- Anthropic Brain 开启 adaptive thinking + 摘要显示, 模型思考过程写入
+  decisions.jsonl 的 thought 字段(数据飞轮的一部分)
+
+两个 Brain 都:原生 tool-use 协议 → 文本 JSON 兜底解析 → 解析失败回喂错误重试 1 次 →
+仍失败安全回退原地重观察;**每轮观测自动内嵌车头相机图像与视觉感知结果**(无单独的
+look 工具);历史以单行摘要传递(不累积历史图);
+decision(含 token/延迟)全量落盘 `decisions.jsonl`。
+LLM 输入/输出实时打印到终端,支持 Kitty 图形协议(Ghostty)内联显示相机图像
+(`config.LLM_TERM_IMAGES`)。
+
+### LLM 可用的工具(动作原语)
+
+| 工具 | 说明 |
+|---|---|
+| `forward(seconds)` / `back(seconds)` | 直行/倒车 |
+| `turn_left(seconds)` / `turn_right(seconds)` | 原地转向(闭环, 里程计反馈) |
+| `arm_pose(pose)` | `stow` 行驶收纳 / `carry` 持球携带 / `reach` 下探抓取 / `drop` 投放 |
+| `shoulder(delta)` / `elbow(delta)` | 肩/肘关节微调(度) |
+| `open_gripper()` / `close_gripper()` | 手指开合(闭合要求真实接触球才算持有) |
+| `done(success)` | 宣告任务结束 |
+
+没有 move-to 类指令,也没有 look()——机器人像真机一样只靠车头相机 + 动作原语完成任务。
+LLM 每轮可一次产出**一批 tool call**,按顺序执行完再带着新观测回来(批量决策)。
+
+工具失败会返回原因(横向超限/超出臂展/附近无球等)并回喂给 LLM —— 失败也是数据。
+
+## 数据格式与 ACT 对接
+
+每集一个目录:
+
+```
+data/episodes/ep_0042/
+  meta.json          # task/brain/success/seed/时长/失败原因
+  decisions.jsonl    # 决策级: {t, img_before/after, thought, tool, args, ok, result}
+  trajectory.jsonl   # 控制级 10Hz: {t, imgs(2路), qpos全量, base_pose, arm_qpos, gripper, ctrl}
+  imgs/              # 000123_front_cam.jpg / 000123_overhead.jpg + 决策快照
+```
+
+**映射到 LeRobotDataset v3 / ACT**:
+
+| LeRobot 键 | 本数据 |
+|---|---|
+| `observation.state` (6维) | `arm_qpos`(2) + `finger`(1) + `base_pose`(3) |
+| `action` (6维) | 同维目标值(下一帧 state 的目标/ctrl 可直接回归绝对动作) |
+| `observation.images.front` | `imgs/*_front_cam.jpg`(车头相机,即策略输入) |
+| `observation.images.overhead` | `imgs/*_overhead.jpg`(仅回放/调试,非策略输入) |
+| `timestamp` / fps | `t` / 10 |
+| tasks 文本 | `meta.json.task` |
+
+参考实现(下一步迭代):
+```python
+from lerobot.common.datasets.v3 import LeRobotDataset
+ds = LeRobotDataset.create("openclaw_pickplace", fps=10, ...   # 需 lerobot>=0.4
+    features={"observation.state": 11维, "action": 11维, 两路图像})
+for ep in episodes:
+    for frame in trajectory:  # 只保留 success=True 的集
+        ds.add_frame({...})
+    ds.save_episode()
+ds.finalize()                 # 必须调用, 否则 parquet footer 损坏
+# 之后: lerobot 官方 ACT policy (ResNet18 + CVAE + 动作分块) 直接训练
+```
+
+**训练建议**(LeRobot 官方经验):相机固定 ✓、抓取行为一致 ✓(脚本策略)、
+~50 条演示起步、ScriptedBrain 批量 200–1000 条很便宜(本机 headless 约 1 分钟/10 集)。
+
+## 两阶段工作流(本仓库定位)
+
+- **阶段一(已交付)**:LLM/脚本 控制 + 全量记录。ScriptedBrain 批量产数据;
+  LLM Brain 处理新任务/冷启动,失败数据同样有价值
+- **阶段二(下一步)**:success=True 的轨迹 → 导出 LeRobot v3 → `lerobot` ACT 训练 →
+  部署 `ACTBrain`(实现同一个 Brain 接口,策略推理代替 LLM)→ 新任务回退 LLM,循环
+
+## 已知限制与下一步
+
+- **脚本策略(纯视觉+原语)当前不稳定**: 找球/对准/接近/抓取段可靠,
+  投放段(持球找箱→对准→停靠)受单相机+手中球遮挡/阴影影响, 成功率低。
+  这正是 LLM 大脑(会推理)与阶段二 ACT 策略(学出来的鲁棒性)要解决的问题
+- 转向原语在持球负载下有时打滑(角速度下降), 待查(轮地摩擦/重心)
+- 本机 nvidia 驱动异常(`nvidia-smi` 失败,渲染不受影响):ACT 训练前需修驱动或用远程 GPU
+- 臂只有 2 自由度:抓取依赖底盘对准;斜侧向目标需要多步 reposition
+- LLM 决策上限 `MAX_DECISIONS=32`(每轮可批量 tool call),任务文本解析支持"N号"球编号

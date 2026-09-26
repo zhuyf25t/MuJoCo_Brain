@@ -1,0 +1,69 @@
+<mujoco model="reference_arm">
+  <!-- 参照 mujoco-pzc/MuJoCo 的两自由度臂: 肩俯仰 + 肘俯仰 位置舵机,
+       掌部 + 单边滑动指(参考车原设计), 夹取由场景中的 weld 等式完成.
+       q1=q2=0 时臂竖直向上, q1 正 = 向前倒. -->
+  <compiler angle="radian" autolimits="true"/>
+  <option integrator="implicitfast"/>
+
+  <default>
+    <default class="arm_orange">
+      <geom rgba="0.95 0.55 0.08 1"/>
+    </default>
+    <joint damping="0.5" armature="0.02" frictionloss="0.05"/>
+  </default>
+
+  <worldbody>
+    <body name="arm_base" pos="0 0 0">
+      <joint name="shoulder_joint" type="hinge" axis="0 1 0" range="-0.3 2.2"/>
+      <geom name="shoulder_motor" class="arm_orange" type="cylinder" size="0.085 0.05"
+            euler="1.5708 0 0" mass="0.6"/>
+      <body name="upper_arm" pos="0 0 0.05">
+        <geom name="upper_link" class="arm_orange" type="capsule"
+              fromto="0 0 0 0 0 0.28" size="0.05" mass="0.5"/>
+        <body name="elbow" pos="0 0 0.33">
+          <joint name="elbow_joint" type="hinge" axis="0 1 0" range="-2.8 2.6"/>
+          <geom name="elbow_motor" class="arm_orange" type="sphere" size="0.065" mass="0.4"/>
+          <body name="forearm" pos="0 0 0.05">
+            <geom name="forearm_link" class="arm_orange" type="capsule"
+                  fromto="0 0 0 0 0 0.25" size="0.04" mass="0.3"/>
+            <!-- 腕部相机: 沿小臂向外看 (compose 加前缀后为 arm_cam) -->
+            <body name="gripper_tip" pos="0 0 0.25">
+              <site name="gripper_tcp" pos="0 0 0.10" size="0.006" rgba="1 0 0 0"/>
+              <geom name="palm" type="box" size="0.05 0.065 0.022"
+                    rgba="0.95 0.25 0.12 1" mass="0.2"/>
+              <!-- 左指滑动(参考车原设计), 右指固定; ctrl 越负越紧 -->
+              <body name="left_finger" pos="0 0.09 0.01">
+                <joint name="finger_slide" type="slide" axis="0 -1 0" range="0 0.05"/>
+                <geom name="left_finger_geom" type="box" pos="0 0 0.06"
+                      size="0.015 0.013 0.07" rgba="0.95 0.25 0.12 1" mass="0.07"
+                      friction="1.0 0.02 0.01" solimp="0.9 0.95 0.01" solref="0.01 1"/>
+              </body>
+              <body name="right_finger" pos="0 -0.09 0.01">
+                <geom name="right_finger_geom" type="box" pos="0 0 0.06"
+                      size="0.015 0.013 0.07" rgba="0.95 0.25 0.12 1" mass="0.07"
+                      friction="1.0 0.02 0.01" solimp="0.9 0.95 0.01" solref="0.01 1"/>
+              </body>
+            </body>
+          </body>
+        </body>
+      </body>
+    </body>
+  </worldbody>
+
+  <!-- 深卷姿态下大小臂几何重叠, 排除自碰撞 (演示级臂的标准做法) -->
+  <contact>
+    <exclude body1="upper_arm" body2="forearm"/>
+    <exclude body1="upper_arm" body2="gripper_tip"/>
+    <exclude body1="upper_arm" body2="left_finger"/>
+    <exclude body1="upper_arm" body2="right_finger"/>
+  </contact>
+
+  <actuator>
+    <position name="shoulder_servo" joint="shoulder_joint" kp="240" kv="24"
+              ctrlrange="-0.3 2.2" forcerange="-35 35"/>
+    <position name="elbow_servo" joint="elbow_joint" kp="200" kv="20"
+              ctrlrange="-2.8 2.6" forcerange="-25 25"/>
+    <position name="finger_servo" joint="finger_slide" kp="90" kv="9"
+              ctrlrange="0 0.05" forcerange="-10 10"/>
+  </actuator>
+</mujoco>

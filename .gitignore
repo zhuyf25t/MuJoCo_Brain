@@ -1,0 +1,39 @@
+# Local Python environments and caches
+.venv*/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Generated episodes, videos, reports, and temporary files
+/data/
+/output/
+/tmp/
+*.log
+MUJOCO_LOG.TXT
+
+# Local credentials and machine-specific configuration
+.env
+.env.*
+!.env.example
+config_local.py
+config.local.py
+*.pem
+*.key
+
+# Build outputs and editor/OS files
+/build/
+/dist/
+*.egg-info/
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.swp
+*.swo

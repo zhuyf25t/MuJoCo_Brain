@@ -1,0 +1,83 @@
+<mujoco model="base_chassis">
+  <!-- 差速小车底盘 —— 造型与真万向脚轮参照 mujoco-pzc/MuJoCo 的网球抓取小车,
+       轮位拓扑用中置双驱动轮 + 前后万向脚轮: 滚转由双轮承担(驱动轮永不卸载),
+       俯仰由前后脚轮承担. 高重心机械臂下这比"前驱+单后脚轮"稳定得多. -->
+  <compiler angle="radian" autolimits="true"/>
+  <option timestep="0.002" integrator="implicitfast" impratio="10"/>
+
+  <default>
+    <default class="body_blue">
+      <geom rgba="0.08 0.25 0.62 1"/>
+    </default>
+    <default class="plate_blue">
+      <geom rgba="0.12 0.42 0.85 1"/>
+    </default>
+    <default class="drive_wheel">
+      <geom type="cylinder" size="0.1 0.03" rgba="0.04 0.04 0.05 1"
+            friction="1.2 0.005 0.0001" condim="3" mass="2.0"
+            solref="0.005 1" solimp="0.95 0.99 0.001"/>
+      <joint type="hinge" axis="0 1 0" armature="0.1" damping="0.05" frictionloss="0.05"/>
+    </default>
+  </default>
+
+  <worldbody>
+    <body name="base" pos="0 0 0.1">
+      <joint name="base_ref" type="free"/>
+      <!-- 车身+顶板+立柱合成惯量, 质心压低 -->
+      <inertial pos="0 0 0.08" mass="55" diaginertia="1.2 1.5 0.9"/>
+      <geom class="body_blue" name="chassis" type="box" size="0.19 0.17 0.09" pos="0 0 0.09"/>
+      <geom class="plate_blue" name="top_plate" type="box" size="0.16 0.14 0.012" pos="0 0 0.19"/>
+      <!-- 车头前向相机: 俯角30°, 看前方地面 (机器人的"眼睛") -->
+      <camera name="front_cam" pos="0.16 0 0.16" quat="0.6124 0.3536 -0.3536 -0.6124" fovy="75"/>
+
+      <site name="arm_mount" pos="0 0 0.20" size="0.005" rgba="0 0 0 0"/>
+
+      <!-- 中置双驱动轮 (差速), 关节轴 = 本体 y, ctrl 正 = 前进 -->
+      <body name="wheel_left" pos="0 0.21 0">
+        <joint name="wheel_left_joint" class="drive_wheel"/>
+        <geom class="drive_wheel" name="wheel_left_geom" euler="1.5708 0 0"/>
+      </body>
+      <body name="wheel_right" pos="0 -0.21 0">
+        <joint name="wheel_right_joint" class="drive_wheel"/>
+        <geom class="drive_wheel" name="wheel_right_geom" euler="1.5708 0 0"/>
+      </body>
+
+      <!-- 前后真万向脚轮 (参考车结构: 绕 z 偏转 + 滚轮, 近零滚阻), 抬高 3mm:
+           常态三点支撑(双轮+受压侧脚轮), 消除四点共面静不定 -->
+      <body name="caster_front" pos="0.17 0 -0.017">
+        <joint name="caster_swivel_f" type="hinge" axis="0 0 1" damping="0.3"/>
+        <geom name="caster_fork_f" type="box" pos="0 0 -0.02" size="0.03 0.03 0.025"
+              rgba="0.25 0.28 0.32 1" mass="0.03" contype="0" conaffinity="0"/>
+        <body name="caster_wheel_f" pos="0 0 -0.045" quat="0.7071 -0.7071 0 0">
+          <joint name="caster_roll_f" type="hinge" axis="0 0 1" damping="0.01"/>
+          <geom name="caster_wheel_f_geom" type="cylinder" size="0.035 0.015"
+                rgba="0.06 0.06 0.07 1" mass="0.02" contype="0" conaffinity="0"/>
+          <!-- 球型碰撞体承担支撑: 各向同性近零摩擦, 自旋不卡(轮子仅作外观) -->
+          <geom name="caster_ball_f_geom" type="sphere" size="0.035"
+                rgba="0.06 0.06 0.07 0" mass="0.08" condim="1"
+                friction="0.001 0.001 0.001" solref="0.005 1" solimp="0.95 0.99 0.001"/>
+        </body>
+      </body>
+      <body name="caster_rear" pos="-0.17 0 -0.017">
+        <joint name="caster_swivel_r" type="hinge" axis="0 0 1" damping="0.3"/>
+        <geom name="caster_fork_r" type="box" pos="0 0 -0.02" size="0.03 0.03 0.025"
+              rgba="0.25 0.28 0.32 1" mass="0.03" contype="0" conaffinity="0"/>
+        <body name="caster_wheel_r" pos="0 0 -0.045" quat="0.7071 -0.7071 0 0">
+          <joint name="caster_roll_r" type="hinge" axis="0 0 1" damping="0.01"/>
+          <geom name="caster_wheel_r_geom" type="cylinder" size="0.035 0.015"
+                rgba="0.06 0.06 0.07 1" mass="0.02" contype="0" conaffinity="0"/>
+          <!-- 球型碰撞体承担支撑: 各向同性近零摩擦, 自旋不卡(轮子仅作外观) -->
+          <geom name="caster_ball_r_geom" type="sphere" size="0.035"
+                rgba="0.06 0.06 0.07 0" mass="0.08" condim="1"
+                friction="0.001 0.001 0.001" solref="0.005 1" solimp="0.95 0.99 0.001"/>
+        </body>
+      </body>
+    </body>
+  </worldbody>
+
+  <actuator>
+    <!-- ctrl 单位 = 轮角速度 rad/s -->
+    <velocity name="wheel_left_vel" joint="wheel_left_joint" kv="100" ctrlrange="-5 5"/>
+    <velocity name="wheel_right_vel" joint="wheel_right_joint" kv="100" ctrlrange="-5 5"/>
+  </actuator>
+</mujoco>

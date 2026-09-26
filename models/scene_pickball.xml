@@ -1,0 +1,64 @@
+<mujoco model="openclaw_scene">
+  <!-- 地面捡网球场景: 围挡场地 + 散落网球 + 地面收纳箱 (无桌子, 参照网球抓取小车) -->
+  <include file="mobile_manip.generated.xml"/>
+
+  <visual>
+    <global offwidth="960" offheight="720"/>
+  </visual>
+
+  <asset>
+    <texture type="skybox" builtin="gradient" rgb1="0.45 0.55 0.7" rgb2="0.85 0.9 0.95" width="256" height="256"/>
+    <texture type="2d" name="ground_tex" builtin="checker" rgb1="0.22 0.26 0.32" rgb2="0.30 0.34 0.40" width="512" height="512"/>
+    <material name="ground_mat" texture="ground_tex" texrepeat="8 8" reflectance="0.08"/>
+  </asset>
+
+  <worldbody>
+    <light name="top" pos="1 0 4" dir="-0.15 0 -1" diffuse="0.9 0.9 0.9" specular="0.3 0.3 0.3"
+           directional="true" castshadow="true"/>
+    <light name="fill" pos="-2 -2 2.5" dir="0.5 0.5 -1" diffuse="0.32 0.32 0.35" directional="true"/>
+
+    <geom name="floor" type="plane" size="4 4 0.1" material="ground_mat"/>
+
+    <!-- 场地围挡 (防网球滚出) -->
+    <geom name="wall_xp" type="box" pos="2.2 0 0.09" size="0.05 2.4 0.09" rgba="0.45 0.48 0.52 1"/>
+    <geom name="wall_xn" type="box" pos="-2.2 0 0.09" size="0.05 2.4 0.09" rgba="0.45 0.48 0.52 1"/>
+    <geom name="wall_yp" type="box" pos="0 2.2 0.09" size="2.4 0.05 0.09" rgba="0.45 0.48 0.52 1"/>
+    <geom name="wall_yn" type="box" pos="0 -2.2 0.09" size="2.4 0.05 0.09" rgba="0.45 0.48 0.52 1"/>
+
+    <!-- 网球 (位置由 env.reset 随机化; 半径 0.06) -->
+    <body name="ball_0" pos="0.9 0.3 0.062">
+      <freejoint name="ball_0_joint"/>
+      <geom name="ball_0_geom" type="sphere" size="0.06" mass="0.06"
+            friction="0.9 0.02 0.01" rgba="0.76 0.96 0.08 1"/>
+    </body>
+    <body name="ball_1" pos="1.3 -0.4 0.062">
+      <freejoint name="ball_1_joint"/>
+      <geom name="ball_1_geom" type="sphere" size="0.06" mass="0.06"
+            friction="0.9 0.02 0.01" rgba="0.76 0.96 0.08 1"/>
+    </body>
+    <body name="ball_2" pos="0.6 -0.8 0.062">
+      <freejoint name="ball_2_joint"/>
+      <geom name="ball_2_geom" type="sphere" size="0.06" mass="0.06"
+            friction="0.9 0.02 0.01" rgba="0.76 0.96 0.08 1"/>
+    </body>
+    <body name="ball_3" pos="1.6 0.7 0.062">
+      <freejoint name="ball_3_joint"/>
+      <geom name="ball_3_geom" type="sphere" size="0.06" mass="0.06"
+            friction="0.9 0.02 0.01" rgba="0.76 0.96 0.08 1"/>
+    </body>
+
+    <!-- 地面收纳箱: 内腔 ~0.34×0.34, 墙高 0.16, 开口朝上 -->
+    <body name="bin" pos="1.35 0.0 0">
+      <geom name="bin_bottom" type="box" size="0.20 0.20 0.012" pos="0 0 0.012" rgba="0.85 0.2 0.75 1"/>
+      <geom name="bin_wall_xp" type="box" size="0.014 0.20 0.08" pos="0.186 0 0.08" rgba="0.85 0.2 0.75 1"/>
+      <geom name="bin_wall_xn" type="box" size="0.014 0.20 0.08" pos="-0.186 0 0.08" rgba="0.85 0.2 0.75 1"/>
+      <geom name="bin_wall_yp" type="box" size="0.20 0.014 0.08" pos="0 0.186 0.08" rgba="0.85 0.2 0.75 1"/>
+      <geom name="bin_wall_yn" type="box" size="0.20 0.014 0.08" pos="0 -0.186 0.08" rgba="0.85 0.2 0.75 1"/>
+    </body>
+
+    <!-- 相机: 俯视(任务观测) + 侧视(演示) -->
+    <camera name="overhead" pos="0.45 0 3.0" fovy="62"/>
+    <camera name="side" pos="-1.2 -2.3 1.5" euler="2.3 -0.65 0" fovy="55"/>
+  </worldbody>
+
+</mujoco>

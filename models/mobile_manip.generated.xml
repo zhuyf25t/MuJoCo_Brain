@@ -1,0 +1,104 @@
+<mujoco model="base_chassis">
+  <!-- 差速小车底盘 —— 造型与真万向脚轮参照 mujoco-pzc/MuJoCo 的网球抓取小车,
+       轮位拓扑用中置双驱动轮 + 前后万向脚轮: 滚转由双轮承担(驱动轮永不卸载),
+       俯仰由前后脚轮承担. 高重心机械臂下这比"前驱+单后脚轮"稳定得多. -->
+  <compiler angle="radian"/>
+
+  <option impratio="10" integrator="implicitfast"/>
+
+  <default>
+    <default class="body_blue">
+      <geom rgba="0.08 0.25 0.62 1"/>
+    </default>
+    <default class="plate_blue">
+      <geom rgba="0.12 0.42 0.85 1"/>
+    </default>
+    <default class="drive_wheel">
+      <joint armature="0.1" damping="0.05" frictionloss="0.05" axis="0 1 0"/>
+      <geom size="0.1 0.03 0" type="cylinder" friction="1.2" solref="0.005" solimp="0.95 0.99" rgba="0.04 0.04 0.05 1"/>
+    </default>
+    <default class="arm_main">
+      <joint armature="0.02" damping="0.5" frictionloss="0.05"/>
+      <default class="arm_arm_orange">
+        <geom rgba="0.95 0.55 0.08 1"/>
+      </default>
+    </default>
+  </default>
+
+  <worldbody>
+    <body name="base" pos="0 0 0.1">
+      <inertial pos="0 0 0.08" mass="55" diaginertia="1.2 1.5 0.9"/>
+      <joint name="base_ref" type="free"/>
+      <geom name="chassis" class="body_blue" size="0.19 0.17 0.09" pos="0 0 0.09" type="box"/>
+      <geom name="top_plate" class="plate_blue" size="0.16 0.14 0.012" pos="0 0 0.19" type="box"/>
+      <site name="arm_mount" pos="0 0 0.2" rgba="0 0 0 0"/>
+      <camera name="front_cam" quat="0.612359 0.353576 -0.353576 -0.612359" pos="0.16 0 0.16" fovy="75"/>
+      <body name="wheel_left" pos="0 0.21 0">
+        <joint name="wheel_left_joint" class="drive_wheel"/>
+        <geom name="wheel_left_geom" class="drive_wheel" quat="0.707105 0.707108 0 0" mass="2"/>
+      </body>
+      <body name="wheel_right" pos="0 -0.21 0">
+        <joint name="wheel_right_joint" class="drive_wheel"/>
+        <geom name="wheel_right_geom" class="drive_wheel" quat="0.707105 0.707108 0 0" mass="2"/>
+      </body>
+      <body name="caster_front" pos="0.17 0 -0.017">
+        <joint name="caster_swivel_f" damping="0.3"/>
+        <geom name="caster_fork_f" size="0.03 0.03 0.025" pos="0 0 -0.02" type="box" contype="0" conaffinity="0" rgba="0.25 0.28 0.32 1" mass="0.03"/>
+        <body name="caster_wheel_f" pos="0 0 -0.045" quat="0.707107 -0.707107 0 0">
+          <joint name="caster_roll_f" damping="0.01"/>
+          <geom name="caster_wheel_f_geom" size="0.035 0.015" type="cylinder" contype="0" conaffinity="0" rgba="0.06 0.06 0.07 1" mass="0.02"/>
+          <geom name="caster_ball_f_geom" size="0.035" condim="1" friction="0.001 0.001 0.001" solref="0.005" solimp="0.95 0.99" rgba="0.06 0.06 0.07 0" mass="0.08"/>
+        </body>
+      </body>
+      <body name="caster_rear" pos="-0.17 0 -0.017">
+        <joint name="caster_swivel_r" damping="0.3"/>
+        <geom name="caster_fork_r" size="0.03 0.03 0.025" pos="0 0 -0.02" type="box" contype="0" conaffinity="0" rgba="0.25 0.28 0.32 1" mass="0.03"/>
+        <body name="caster_wheel_r" pos="0 0 -0.045" quat="0.707107 -0.707107 0 0">
+          <joint name="caster_roll_r" damping="0.01"/>
+          <geom name="caster_wheel_r_geom" size="0.035 0.015" type="cylinder" contype="0" conaffinity="0" rgba="0.06 0.06 0.07 1" mass="0.02"/>
+          <geom name="caster_ball_r_geom" size="0.035" condim="1" friction="0.001 0.001 0.001" solref="0.005" solimp="0.95 0.99" rgba="0.06 0.06 0.07 0" mass="0.08"/>
+        </body>
+      </body>
+      <body name="arm_arm_base" pos="0 0 0.2">
+        <joint name="arm_shoulder_joint" range="-0.3 2.2" armature="0.02" damping="0.5" frictionloss="0.05" axis="0 1 0"/>
+        <geom name="arm_shoulder_motor" class="arm_arm_orange" size="0.085 0.05" quat="0.707105 0.707108 0 0" type="cylinder" mass="0.6"/>
+        <body name="arm_upper_arm" pos="0 0 0.05">
+          <geom name="arm_upper_link" class="arm_arm_orange" size="0.05 0.14" pos="0 0 0.14" quat="0 1 0 0" type="capsule" mass="0.5"/>
+          <body name="arm_elbow" pos="0 0 0.33">
+            <joint name="arm_elbow_joint" range="-2.8 2.6" armature="0.02" damping="0.5" frictionloss="0.05" axis="0 1 0"/>
+            <geom name="arm_elbow_motor" class="arm_arm_orange" size="0.065" mass="0.4"/>
+            <body name="arm_forearm" pos="0 0 0.05">
+              <geom name="arm_forearm_link" class="arm_arm_orange" size="0.04 0.125" pos="0 0 0.125" quat="0 1 0 0" type="capsule" mass="0.3"/>
+              <body name="arm_gripper_tip" pos="0 0 0.25">
+                <geom name="arm_palm" size="0.05 0.065 0.022" type="box" rgba="0.95 0.25 0.12 1" mass="0.2"/>
+                <site name="arm_gripper_tcp" size="0.006" pos="0 0 0.1" rgba="1 0 0 0"/>
+                <body name="arm_left_finger" pos="0 0.09 0.01">
+                  <joint name="arm_finger_slide" type="slide" range="0 0.05" armature="0.02" damping="0.5" frictionloss="0.05" axis="0 -1 0"/>
+                  <geom name="arm_left_finger_geom" size="0.015 0.013 0.07" pos="0 0 0.06" type="box" friction="1 0.02 0.01" solref="0.01" solimp="0.9 0.95 0.01" rgba="0.95 0.25 0.12 1" mass="0.07"/>
+                </body>
+                <body name="arm_right_finger" pos="0 -0.09 0.01">
+                  <geom name="arm_right_finger_geom" size="0.015 0.013 0.07" pos="0 0 0.06" type="box" friction="1 0.02 0.01" solref="0.01" solimp="0.9 0.95 0.01" rgba="0.95 0.25 0.12 1" mass="0.07"/>
+                </body>
+              </body>
+            </body>
+          </body>
+        </body>
+      </body>
+    </body>
+  </worldbody>
+
+  <contact>
+    <exclude body1="arm_upper_arm" body2="arm_forearm"/>
+    <exclude body1="arm_upper_arm" body2="arm_gripper_tip"/>
+    <exclude body1="arm_upper_arm" body2="arm_left_finger"/>
+    <exclude body1="arm_upper_arm" body2="arm_right_finger"/>
+  </contact>
+
+  <actuator>
+    <general name="wheel_left_vel" joint="wheel_left_joint" ctrlrange="-5 5" biastype="affine" gainprm="100" biasprm="0 0 -100"/>
+    <general name="wheel_right_vel" joint="wheel_right_joint" ctrlrange="-5 5" biastype="affine" gainprm="100" biasprm="0 0 -100"/>
+    <general name="arm_shoulder_servo" joint="arm_shoulder_joint" ctrlrange="-0.3 2.2" forcerange="-35 35" biastype="affine" gainprm="240" biasprm="0 -240 -24"/>
+    <general name="arm_elbow_servo" joint="arm_elbow_joint" ctrlrange="-2.8 2.6" forcerange="-25 25" biastype="affine" gainprm="200" biasprm="0 -200 -20"/>
+    <general name="arm_finger_servo" joint="arm_finger_slide" ctrlrange="0 0.05" forcerange="-10 10" biastype="affine" gainprm="90" biasprm="0 -90 -9"/>
+  </actuator>
+</mujoco>

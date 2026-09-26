@@ -1,0 +1,3 @@
+# Keep Python, XML, and the Bash launcher portable between Windows and WSL.
+* text=auto eol=lf
+*.stl binary
