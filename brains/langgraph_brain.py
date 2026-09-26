@@ -65,6 +65,7 @@ class RoundContext:
     scene: dict | None = None
     scene_reused: bool = False
     calibration_gripper: str | None = None
+    release_needs_new_frame: bool = False
 
 
 class LangGraphBrain(Brain):
@@ -165,16 +166,21 @@ class LangGraphBrain(Brain):
             return
         if ctx.scene["holding"] == "empty":
             return  # An independent current view allows preparation after an empty grasp.
+        if any(n in POSITION_TOOLS for n in names[:names.index("open_gripper")]):
+            ctx.release_needs_new_frame = True
+            raise ValueError("持球时定位与释放不能同批：先完成转向/接近/调臂，看下一张图后再松爪；本轮重规划也不能删除定位动作直接松爪")
+        if ctx.release_needs_new_frame:
+            raise ValueError("本轮先前计划还需要定位，没有新图不能改称已经到位；保持闭爪，完成必要定位或观察后再判断释放")
+        if ctx.scene["holding"] != "held" or report["holding"] != "held":
+            raise ValueError("可能持球但当前夹持关系看不清，先保持闭爪改善观察；规划改称held不能替代独立当前图确认")
         if ctx.scene["release_view"] != "candidate":
             raise ValueError("独立当前图观测不支持释放：" + ctx.scene["evidence"] + "。保持闭爪，先解决高度、前后位置或观察问题")
         if report["phase"] != "place":
             raise ValueError("持球松爪属于place，先确认投放位置")
-        if any(n in POSITION_TOOLS for n in names[:names.index("open_gripper")]):
-            raise ValueError("持球时定位与释放不能同批：先完成转向/接近/调臂，看下一张图后再松爪")
         check = report.get("release_check")
-        if (not isinstance(check, dict) or set(check) != {"above_rim", "inside_opening", "evidence"} or
-                check["above_rim"] is not True or check["inside_opening"] is not True):
-            raise ValueError("释放须用当前图确认整颗球高过近侧箱沿、落点进入箱口内部；release_check两项均须为true")
+        if (not isinstance(check, dict) or set(check) != {"clear_drop_path", "inside_opening", "evidence"} or
+                check["clear_drop_path"] is not True or check["inside_opening"] is not True):
+            raise ValueError("释放须确认球向下落不撞箱沿或外壁、整颗落点在箱内；release_check两项均须为true")
         self._text(check["evidence"], "release_check.evidence")
         target = original["visual_memory"]["target"]
         if not target or target["kind"] != "bin":
@@ -447,6 +453,9 @@ class LangGraphBrain(Brain):
         expected = self._text(report.get("expected"), "expected")
         actions = report.get("actions")
         self._validate_actions(actions, ctx.tools)  # Validate the whole batch before returning any part.
+        # Remember unexecuted positioning before other report errors can trigger
+        # a retry that drops those actions and changes its holding claim.
+        self._validate_release(original, ctx, report)
         names = [a["tool"] for a in actions]
         state = deepcopy(original)
         calibration = state["calibration"]
@@ -457,9 +466,6 @@ class LangGraphBrain(Brain):
             raise ValueError("独立当前图没有确认空爪，不能用规划中的empty清除可能持球；先保持闭爪改善观察")
         if view == "held" and ctx.scene["holding"] == "empty":
             raise ValueError("独立当前图报告空爪，不能直接声称持球；先核对图片、改善观察")
-        if "open_gripper" in names and view == "unclear":
-            if may_hold and ctx.scene["holding"] != "empty":
-                raise ValueError("可能持球且当前看不清，不能用张爪检查；先保持闭爪改善视野")
         if "learning" in report and state["last_batch"] is not None:
             lesson = {"text": self._text(report["learning"], "learning"), "through_history_n": len(ctx.commands)}
             if not calibration["lessons"] or lesson["text"] != calibration["lessons"][-1]["text"]:
@@ -504,7 +510,6 @@ class LangGraphBrain(Brain):
                 raise ValueError("修正抓球区域须当前已张爪、没有可能持球，并看见地面球；不能依据本批未来动作")
             # A better estimate of where the ball belongs does not relearn the arm route.
             calibration["grasp"] = self._grasp_ref(report["grasp_region"], ctx, "grasp_region")
-        self._validate_release(original, ctx, report)
         phase = report["phase"]
         if names == ["done"] and actions[0]["args"]["success"]:
             if phase != "place" or original["phase"] != "place" or view == "held" or not gripper or gripper[-1] != "open_gripper":
@@ -569,7 +574,7 @@ class LangGraphBrain(Brain):
                 raise RuntimeError("图未产生动作批次")
             self._round = ctx.round_no
         finally:
-            self.memory.log({"format_version": 6, "round": ctx.round_no, "model": self.llm.model,
+            self.memory.log({"format_version": 7, "round": ctx.round_no, "model": self.llm.model,
                              "entry_node": ctx.entry_node, "action_phase": self.state.get("phase"),
                              "current_frame": ctx.frame, "current_scene": ctx.scene, "scene_reused": ctx.scene_reused,
                              "calibration_gripper": ctx.calibration_gripper,

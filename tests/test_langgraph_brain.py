@@ -32,7 +32,7 @@ GRASP = {"region": [.44, .72, .56, .88], "note": "测试假设：实体张爪接
 
 
 CLEARANCE = {"save_current": True, "note": "爪已离地让开视线，肘未调整"}
-RELEASE = {"above_rim": True, "inside_opening": True, "evidence": "测试假设：接近前后图确认球越过近沿且高于箱口"}
+RELEASE = {"clear_drop_path": True, "inside_opening": True, "evidence": "测试假设：接近前后图确认球向下可落入箱内，不撞沿"}
 
 
 def scene(holding="empty", release_view="unclear"):
@@ -261,12 +261,45 @@ def test_positioning_and_release_need_a_new_image(movement, make_brain):
     assert batches[7][0].tool == "open_gripper"
 
 
-@pytest.mark.parametrize("check", [None, {**RELEASE, "above_rim": False}, {**RELEASE, "inside_opening": False},
-                                  {**RELEASE, "evidence": ""}, {**RELEASE, "above_rim": 1}])
+@pytest.mark.parametrize("check", [None, {**RELEASE, "clear_drop_path": False}, {**RELEASE, "inside_opening": False},
+                                  {**RELEASE, "evidence": ""}, {**RELEASE, "clear_drop_path": 1}])
 def test_release_requires_current_explicit_assessment(check, make_brain):
     bad = plan(action("open_gripper"), phase="place", holding="held", release_check=check)
     brain, requests = make_brain(workflow()[:6] + [bad, plan(phase="place", holding="held")])
     assert run_ticks(brain, [], 7)[-1][0].tool == "observe" and len(requests) == 8
+
+
+@pytest.mark.parametrize("first_claim", ["held", "unclear", "empty"])
+def test_release_retry_cannot_discard_required_positioning(first_claim, make_brain):
+    release = workflow()[6]
+    mixed = deepcopy(release)
+    mixed["holding"] = first_claim
+    mixed["actions"].insert(0, action("forward", seconds=.1))
+    views = [scene() for _ in range(5)] + [scene("held", "candidate") for _ in range(3)]
+    brain, requests = make_brain(workflow()[:6] + [mixed, release, release], scenes=views)
+    batches = run_ticks(brain, [], 8)
+    assert [d.tool for d in batches[6]] == ["observe"]
+    assert batches[7][0].tool == "open_gripper"
+    assert len(requests) == 9
+    trace = [json.loads(s) for s in (brain.trace_dir / "rounds.jsonl").read_text(encoding="utf-8").splitlines()]
+    errors = [request.get("validation_error", "") for request in trace[6]["requests"]]
+    assert any("删除定位" in error for error in errors)
+    assert any("没有新图" in error for error in errors)
+
+
+@pytest.mark.parametrize("holding_claim", ["held", "unclear"])
+def test_planner_cannot_release_when_independent_grip_is_obscured(holding_claim, make_brain):
+    prefix = workflow()[:6]
+    release = plan(action("open_gripper"), phase="place", holding=holding_claim, release_check=RELEASE)
+    views = [scene() for _ in prefix]
+    views[-1] = scene("held", "candidate")
+    views.append(scene("unclear", "candidate"))
+    retry = {**release, "holding": "held"}
+    plans = prefix + [release, retry]
+    brain, requests = make_brain(plans, scenes=views)
+    batches = run_ticks(brain, [], len(prefix) + 1)
+    assert [d.tool for d in batches[-1]] == ["observe"]
+    assert len(requests) == len(prefix) + 2
 
 
 def test_only_rotating_does_not_establish_bin_depth(make_brain):
