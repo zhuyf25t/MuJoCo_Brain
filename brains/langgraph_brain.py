@@ -546,8 +546,13 @@ class LangGraphBrain(Brain):
                 raise ValueError("pick复用固定肘的抓球方法；确实需要改肘/换预设时先回explore重建")
             if phase == "place" and original["phase"] != "place" and view != "held":
                 raise ValueError("进入place须当前看清持球；预测闭爪抬起后仍用pick，下轮再核对")
-            if view == "held" and phase != "place":
-                raise ValueError("当前已看清持球，应进入place安排运送或改善视野")
+            # A ball between open jaws can be mistaken for an already lifted ball.
+            # Preserve a planned close/lift check; the label must not force transport.
+            securing_grasp = (original["phase"] == phase == "pick" and gripper and
+                              gripper[-1] == "open_gripper" and names[0] == "close_gripper" and
+                              all(n in {"close_gripper", "shoulder", "observe"} for n in names))
+            if view == "held" and phase != "place" and not securing_grasp:
+                raise ValueError("holding=held与当前阶段不一致；若确已夹稳可进入place，若证据仍不确定应如实填unclear，不要为换阶段省掉尚未执行的抓取与确认动作")
             if original["phase"] == "place" and phase == "pick" and view != "empty":
                 raise ValueError("回捡球须当前看清空爪/掉球；看不清可保持闭爪改善视野或回explore恢复参照")
         if "target" in report:

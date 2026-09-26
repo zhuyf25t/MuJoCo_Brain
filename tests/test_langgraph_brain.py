@@ -461,6 +461,55 @@ def test_visible_open_geometry_can_be_saved_when_initial_hold_is_unclear(make_br
     assert brain.state["visual_memory"]["held"] is None
 
 
+def test_held_label_preserves_pick_close_and_lift_without_relaxing_release(make_brain):
+    confirm = plan(action("close_gripper"), action("shoulder", delta=-.3), phase="pick", holding="held")
+    release = plan(action("open_gripper"), phase="place", holding="held", release_check=RELEASE)
+    views = [scene(p["holding"]) for p in workflow()[:4]] + [scene("held", "blocked")] * 2
+    brain, requests = make_brain(workflow()[:4] + [confirm, release, plan(phase="place", holding="held")], scenes=views)
+    history = []
+    run_ticks(brain, history, 4)
+    batch = tick(brain, history, 80)
+    assert [d.tool for d in batch] == ["close_gripper", "shoulder"]
+    assert len(requests) == 5 and brain.state["phase"] == "pick"  # No correction discards the grasp.
+    assert brain.state["visual_memory"]["held"] is not None
+    batch = tick(brain, history, 100)
+    assert [d.tool for d in batch] == ["observe"] and len(requests) == 7
+    assert brain.state["phase"] == "place" and brain.state["visual_memory"]["held"] is not None
+
+
+@pytest.mark.parametrize("actions", [
+    [action("observe")],
+    [action("shoulder", delta=-.3), action("close_gripper")],
+    [action("close_gripper"), action("forward", seconds=.2)],
+    [action("close_gripper"), action("turn_right", seconds=.2)],
+    [action("close_gripper"), action("open_gripper")],
+])
+def test_held_pick_exception_does_not_allow_transport_release_or_late_close(actions, make_brain):
+    bad = plan(*actions, phase="pick", holding="held")
+    corrected = plan(action("close_gripper"), action("shoulder", delta=-.3), phase="pick", holding="unclear")
+    brain, requests = make_brain(workflow()[:4] + [bad, corrected])
+    batches = run_ticks(brain, [], 5)
+    assert [d.tool for d in batches[-1]] == ["close_gripper", "shoulder"]
+    assert len(requests) == 6 and brain.state["phase"] == "pick"
+    assert brain.state["visual_memory"]["held"] is not None
+
+
+@pytest.mark.parametrize("boundary", ["explore", "last_close", "place"])
+def test_held_pick_confirmation_requires_existing_pick_and_last_open(boundary, make_brain):
+    if boundary == "explore":
+        prefix = workflow()[:3]
+    elif boundary == "last_close":
+        prefix = workflow()[:4] + [plan(action("close_gripper"), phase="pick")]
+    else:
+        prefix = workflow()[:7]  # Has released; last gripper command is open, phase is place.
+    bad = plan(action("close_gripper"), action("shoulder", delta=-.3),
+               phase="pick", holding="held", arm_view="grasp" if boundary == "explore" else "other")
+    brain, requests = make_brain(prefix + [bad, plan(phase="place", holding="held")])
+    batches = run_ticks(brain, [], len(prefix) + 1)
+    assert [d.tool for d in batches[-1]] == ["observe"]
+    assert len(requests) == len(prefix) + 2 and brain.state["phase"] == "place"
+
+
 def test_no_visual_change_cannot_certify_a_lift(make_brain):
     brain, requests = make_brain([
         plan(action("shoulder", delta=-.3), arm_view="grasp", grasp_reference=GRASP),
