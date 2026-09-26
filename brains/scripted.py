@@ -28,15 +28,21 @@ class ScriptedBrain(Brain):
     def __init__(self, env: MobileManipEnv, seed: int | None = None):
         self.env = env
         self.rng = np.random.default_rng(seed)
-        self._phase = "find_ball"     # find_ball/align_ball/approach/grasp_seq
-        #                               /find_bin/align_bin/approach_bin/drop_seq/done
-        self._seq = 0                 # 阶段内子步骤
-        self._search = 0              # 搜索计数
+        self.reset()
 
     def reset(self) -> None:
+        """每集独立: 清空失败计数、目标承诺和上一场景的视觉记忆."""
         self._phase = "find_ball"
         self._seq = 0
         self._search = 0
+        self._n = 0
+        self._grasp_fails = 0
+        self._last_ball_br = None
+        self._last_bin_br = None
+        self._bin_mem = None
+        self._bin_seen = None
+        self._occl = 0
+        self._close_steps = 0
 
     # ---------- 感知 ----------
     def _see(self):

@@ -2,23 +2,17 @@
 
 基于 MuJoCo 的机器人智能体实验平台，支持可替换大脑、工具调用与仿真轨迹记录。
 
-把 OpenClaw 的"LLM + 工具 + 环境"范式迁移到机器人:多模态 LLM 作为大脑,
-通过工具调用控制捡球机器人,自动记录 观测/思考/动作/结果 形成数据飞轮,
-后续蒸馏 ACT 等专用模仿学习策略,实现"LLM 兜底通用 → 专用策略沉淀"的
-两阶段自进化闭环。
+项目关注大脑、工具与环境之间的闭环:大脑根据观测选择动作，控制层执行动作，
+MuJoCo 推进物理模拟并生成新图像，记录器保存决策与轨迹。
+`scripted` 是用于验证流程的规则基线；`openai` 和 `anthropic` 是可替换的 LLM 接口。
+采集过程不训练模型；LeRobot 导出与 ACT 训练属于后续规划。
 
-```
-┌──────────────┐  车头相机图像+状态  ┌────────────────┐  原生 tool-use   ┌────────────────┐
-│ MuJoCo 仿真   │ ───────────→ │ Brain(统一接口) │ ───────────────→ │ ToolLayer       │
-│ 差速小车+两自由│ ←──────────── │ scripted /     │                  │ forward/back   │
-│ 度臂+地面网球 │  底层控制循环  │ openai兼容 /    │                  │ turn_l/r …     │
-└──────────────┘               │ anthropic      │                  └──────┬─────────┘
-     │                         └────────────────┘                         │
-     └──────────── EpisodeRecorder(决策级 + 控制级 10Hz) ←─────────────────┘
-                        → data/episodes/ep_XXXX/ → (导出 LeRobot v3 → 训练 ACT)
-```
+![MuJoCo_Brain 系统架构](docs/architecture.svg)
 
-**任务**: 场地上散落 4 个网球,把指定编号的球捡起来放进绿色收纳箱
+[查看或修改 Mermaid 图源](docs/architecture.mmd)。SVG 在 GitHub 和普通 Markdown 预览中均可直接显示。
+
+**当前任务**: 场地上散落 4 个网球，把任意一个球捡起来放进洋红色收纳箱。
+视觉策略不区分球编号；环境独立检查球是否入箱并基本静止。
 (机器人/任务形态参照 `mujoco-pzc/MuJoCo` 网球抓取小车)。
 
 ## 机器人(参照 mujoco-pzc/MuJoCo 网球抓取小车)
@@ -37,8 +31,8 @@
   (生成 `models/mobile_manip.generated.xml`)
 - **相机**:`front_cam` 装在**车头**(俯角30°,机器人的唯一"眼睛",感知走视觉);
   `overhead/side` 仅用于录像回放,大脑不可见
-- **控制**:底盘三段式 P 控制(转向→直行→转正,减速度预算回速,受阻检测);
-  臂 2R 解析 IK(双肘分支,先下卷后上翻)+ 二次 IK 修正伺服稳态误差
+- **控制**:底盘前进/后退按固定速度执行指定时长，转向用里程计反馈减速到位；
+  机械臂通过预设关节姿态与微调控制，项目另保留 2R 解析 IK 工具
 
 ## 目录结构(控制与仿真分离)
 
@@ -62,6 +56,8 @@ run_collect.py                   # 采集主入口
 run                              # 一键运行 (自举 venv → 生成模型 → 采集)
 inspect_data.py                  # 数据统计 + 回放视频导出
 rerender.py                      # 离线重渲染 (回放 trajectory, 任意相机出片)
+replay_gui.py                    # 历史轨迹的交互式 GUI 回放
+playback.py                      # 轨迹校验与状态恢复 (GUI/视频共用)
 termimg_test.py                  # 终端内联图像(Kitty 协议)自检
 tests/                           # 纯控制层(无mujoco) + 仿真管线 + LLM 协议 mock
 data/episodes/                   # 采集输出
@@ -111,7 +107,7 @@ python -m pip check
 ```bash
 source .venv/bin/activate    # 或激活自己创建的 WSL 虚拟环境
 
-# 1. 脚本策略采集(无需 API Key,数据飞轮主力)
+# 1. 规则基线采集(无需 API Key，不进行训练)
 python run_collect.py --brain scripted --episodes 10
 
 # 2. 查看数据
@@ -119,8 +115,11 @@ python inspect_data.py
 python inspect_data.py --decisions ep_0000     # 决策日志
 python rerender.py ep_0000 --cams overhead side # 离线重渲染(960x720, 不用重跑)
 
-# 3. GUI 边看边采(WSL 2/WSLg;采集结束时窗口会关闭)
-MUJOCO_GL=glfw python run_collect.py --brain scripted --episodes 1 --gui
+# 3. GUI 实时采集；--keep-open 在采集结束后保留窗口
+MUJOCO_GL=glfw python run_collect.py --brain scripted --episodes 1 --gui --keep-open
+
+# 已有轨迹的交互式回放，不重新调用 brain
+MUJOCO_GL=glfw python replay_gui.py ep_0007
 
 # 只查看场景,不运行捡球策略
 MUJOCO_GL=glfw python -m mujoco.viewer --mjcf=models/scene_pickball.xml
@@ -134,6 +133,100 @@ MuJoCo 会自动安装 Python 的 `glfw` 和 `PyOpenGL` 依赖。
 当前 OpenAI 兼容接口直接使用 `httpx`,Anthropic 接口使用 `anthropic` + `httpx2`;
 `brains/__init__.py` 会导入所有大脑,因此脚本模式也需要这些包。
 当前尚无 LangGraph、PyTorch 或 LeRobot 的实际代码依赖,训练工作流实现后再添加。
+
+## 查看记录与 GUI 回放
+
+以下命令在项目根目录、激活虚拟环境后执行。`ep_0007` 是示例，换成自己已有的
+episode 名；仓库不包含 `data/` 中的本地采集数据。先执行 `python inspect_data.py`
+可以列出已有记录。
+
+| 文件 | 内容与来源 | 用途 |
+|---|---|---|
+| `meta.json` | 任务、brain、种子、工具调用次数、环境成功判定和结束原因 | 查看本集概况 |
+| `decisions.jsonl` | brain 的工具名、参数、说明，以及工具执行反馈 | 解释每个动作 |
+| `trajectory.jsonl` | 约 10 Hz 的仿真时间、全量 `qpos`、机器人状态与 `ctrl` | 重建历史画面 |
+| `imgs/` | 录制相机图像及每次工具调用前后的快照 | 看图与导出原始录像 |
+
+JSONL 每行都是一个独立的 JSON 对象。决策记录的行数等于工具调用次数，
+轨迹记录按控制采样产生，二者不一一对应。`thought` 在 scripted 模式下是固定规则
+填写的说明；LLM 模式下保存适配器返回的文本说明，可能为空。
+
+```bash
+python inspect_data.py --meta ep_0007
+python inspect_data.py --decisions ep_0007
+python inspect_data.py --frame ep_0007 --index 0
+```
+
+### 实时演示与历史回放的区别
+
+- `run_collect.py --gui`：运行新的任务，brain 持续决策，并生成新记录。
+  加 `--keep-open` 可保留最后画面；关闭窗口会停止后续采集。
+- `replay_gui.py`：读取已经保存的状态，不调用 brain，也不重新执行工具或推进物理。
+  可以自由调整视角，空格暂停/继续，`R` 从头重播。默认播放结束后保留窗口。
+- `inspect_data.py --replay`：把已存图片合成 MP4。
+- `rerender.py`：读取轨迹重新渲染 MP4，可改变相机与分辨率。
+
+```bash
+# 按 episode 名回放，也可以直接传入 JSONL 文件
+MUJOCO_GL=glfw python replay_gui.py ep_0007
+MUJOCO_GL=glfw python replay_gui.py data/episodes/ep_0007/trajectory.jsonl --speed 0.5
+
+# 其他数据目录、循环播放、只校验文件
+python replay_gui.py ep_0000 --root output/my_run --loop
+python replay_gui.py ep_0007 --check
+
+# 导出视频（不打开 GUI）
+python inspect_data.py --replay ep_0007 --cam overhead
+python rerender.py ep_0007 --cams overhead side
+```
+
+`--speed 2` 为两倍速，`--exit-on-end` 可在播放结束后自动关闭窗口。
+回放必须使用录制时对应的模型；自定义场景可通过 `--model path/to/scene.xml` 指定。
+程序会检查每帧的位置/控制量维度、时间顺序和数值，但同维度不代表同一模型。
+当前轨迹用于姿态回放，没有完整保存速度、接触与随机化参数，不能当作精确续跑
+物理模拟的存档。显示状态仍为原有约 10 Hz 采样，GUI 刷新更快不会补出新状态。
+
+Windows 原生 Python 环境也可执行 `python replay_gui.py ep_0007`，默认使用 GLFW；
+它需要独立安装 Windows 版依赖，不能使用 WSL 的 `.venv`。
+`--check` 不创建窗口，可用于区分轨迹问题与图形环境问题。
+
+如果 WSL 的 GPU 初始化卡住，可以先用进程级软件渲染验证离屏采集/导出，
+不会修改系统配置（速度可能更慢）：
+
+```bash
+MUJOCO_GL=egl LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe MESA_LOADER_DRIVER_OVERRIDE=llvmpipe \
+  python run_collect.py --brain scripted --episodes 1 --out output/software-check
+```
+
+WSLg 窗口创建仍依赖系统图形服务；软件 EGL 验证通过不代表 WSLg 窗口问题已经解决。
+
+### 终端每一行是谁产生的
+
+```text
+[动作01/轮01] brain: turn_right({'seconds': 0.37})
+    tool[OK]: 右转 0.4s (实际转-22°) 完成, 当前位姿 [-0.9, 0.01, -0.39]
+```
+
+- `动作01/轮01`：采集程序的工具调用编号与 brain 决策轮次。LLM 一轮可返回多个动作。
+- `brain: turn_right(...)`：brain 选出的工具名称与参数。
+- `tool[OK]`：工具/控制层的执行反馈，表示动作执行成功，不保证抓球或入箱成功。
+- `实际转-22°` 和 `当前位姿`：控制层读取仿真状态后生成的反馈；中文不是 MuJoCo 自动生成的。
+- 位姿是 `[x 米, y 米, yaw 弧度]`，第三项是朝向，不是高度。
+- `done(success=True)`：brain 的自评；最终 `环境判定: PASS/FAIL` 由评估代码独立读取
+  球的位置和速度决定。新记录还用 `meta.brain_success` 单独保存自评。
+
+默认最多 32 轮 brain 决策；scripted 每轮一个工具调用，LLM 批量调用时总动作数可能更大。
+物理步长是 0.002 秒，控制/记录周期是 0.1 秒，brain 则在上一批动作完成后再决策。
+`forward(seconds=2)` 中的时间是模拟时间，运行和渲染所用的实际时间可能更长。
+
+### 生命周期与当前边界
+
+每个 episode 都清空规则 brain 的阶段、失败计数、搜索状态及目标记忆，避免上一集
+影响下一集。车头相机、录制相机和记录文件均显式关闭，正常结束、异常和 Ctrl+C
+都会走资源释放路径；GUI 不再依赖强制跳过 Python 清理来退出。
+
+这两项修复保证回合独立和资源收尾，不代表规则策略已具备稳定抓取/投放能力。
+感知误差、接近策略和投放判断仍是基线的已知限制。
 
 ## 接入 LLM 大脑
 

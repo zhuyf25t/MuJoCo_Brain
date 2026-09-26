@@ -163,8 +163,11 @@ def test_scripted_episode_end_to_end(tmp_path):
     env.reset(seed=0, task=parse_task("0号网球"))
     brain = ScriptedBrain(env)
     schemas = ToolLayer(env.robot.base, env.robot.arm, env.robot.hal).schemas_anthropic()
-    out = run_episode(env, brain, schemas, "把0号网球捡起来放进收纳箱",
-                      tmp_path / "ep_test", save_images=False, verbose=False)
+    try:
+        out = run_episode(env, brain, schemas, "把0号网球捡起来放进收纳箱",
+                          tmp_path / "ep_test", save_images=False, verbose=False)
+    finally:
+        env.close()
     ep = tmp_path / "ep_test"
     assert (ep / "meta.json").exists()
     decisions = [json.loads(l) for l in (ep / "decisions.jsonl").read_text().splitlines()]

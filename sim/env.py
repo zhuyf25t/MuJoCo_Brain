@@ -75,6 +75,16 @@ class MobileManipEnv:
         self.rng = np.random.default_rng()
 
     # ---------- 生命周期 ----------
+    def close(self) -> None:
+        """在图形系统退出之前释放车头相机; 可重复调用."""
+        self.hal.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
+
     def reset(self, seed: int | None = None, task: TaskSpec | None = None) -> None:
         if seed is not None:
             self.rng = np.random.default_rng(seed)

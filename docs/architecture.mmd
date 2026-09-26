@@ -1,0 +1,26 @@
+flowchart TB
+    SIM["MuJoCo 仿真<br/>物理模拟 · 相机渲染"]
+    BRAIN["Brain · 可替换大脑<br/>scripted / openai / anthropic"]
+    TOOLS["ToolLayer + 控制器<br/>底盘 · 机械臂 · 夹爪"]
+    REC["EpisodeRecorder<br/>决策记录 + 10 Hz 状态采样"]
+    DATA["data/episodes/ep_XXXX/<br/>JSON / JSONL / 图像"]
+    REPLAY["历史回放<br/>交互式 GUI / MP4"]
+    TRAIN["后续规划<br/>LeRobot 导出 / ACT 训练"]
+
+    SIM -->|车头图像 + 本体状态| BRAIN
+    BRAIN -->|工具名称 + 参数| TOOLS
+    TOOLS -->|轮速 + 关节控制量| SIM
+    TOOLS -->|执行反馈| BRAIN
+    SIM -.->|状态与图像| REC
+    BRAIN -.->|决策说明与动作| REC
+    TOOLS -.->|执行结果| REC
+    REC --> DATA
+    DATA --> REPLAY
+    DATA -.-> TRAIN
+
+    classDef brain fill:#e8f0ff,stroke:#4169a1,color:#172b4d
+    classDef simulation fill:#e6f4ef,stroke:#38836b,color:#163d30
+    classDef planned fill:#f5f5f5,stroke:#888,color:#555,stroke-dasharray:5 5
+    class BRAIN brain
+    class SIM,TOOLS simulation
+    class TRAIN planned

@@ -18,11 +18,11 @@ import config
 
 
 def load_ep(ep_dir: Path) -> dict:
-    meta = json.loads((ep_dir / "meta.json").read_text())
+    meta = json.loads((ep_dir / "meta.json").read_text(encoding="utf-8"))
     decisions = [json.loads(l) for l in
-                 (ep_dir / "decisions.jsonl").read_text().splitlines() if l.strip()]
+                 (ep_dir / "decisions.jsonl").read_text(encoding="utf-8").splitlines() if l.strip()]
     traj_path = ep_dir / "trajectory.jsonl"
-    traj = [json.loads(l) for l in traj_path.read_text().splitlines() if l.strip()]
+    traj = [json.loads(l) for l in traj_path.read_text(encoding="utf-8").splitlines() if l.strip()]
     return {"meta": meta, "decisions": decisions, "traj": traj}
 
 
@@ -66,34 +66,50 @@ def replay(ep_dir: Path, out: str | None = None, cam: str = "overhead") -> None:
         print(f"该 episode 没有 {cam} 相机图像 (--no-images 采集?)")
         return
     out = out or str(ep_dir / f"replay_{cam}.mp4")
-    w = imageio.get_writer(out, fps=config.CTRL_HZ, codec="libx264", quality=8,
-                           macro_block_size=None)
-    for f in frames:
-        w.append_data(f)
-    w.close()
+    with imageio.get_writer(out, fps=config.CTRL_HZ, codec="libx264", quality=8,
+                            macro_block_size=None) as writer:
+        for f in frames:
+            writer.append_data(f)
     print(f"回放视频: {out} ({len(frames)} 帧 @ {config.CTRL_HZ}fps)")
 
 
 def show_decisions(ep_dir: Path) -> None:
     d = load_ep(ep_dir)
     for r in d["decisions"]:
-        flag = "OK  " if r["ok"] else "FAIL"
-        thought = (r.get("thought") or "").replace("\n", " ")[:60]
-        print(f"[{r['i']:02d}] t={r['t']:6.1f}s {flag} {r['tool']}({json.dumps(r['args'], ensure_ascii=False)})")
-        print(f"      思考: {thought}")
-        print(f"      结果: {r['result'][:120].replace(chr(10), ' ')}")
+        flag = "OK" if r["ok"] else "FAIL"
+        thought = (r.get("thought") or "").replace("\n", " ")
+        print(f"[动作{r['i']+1:02d}] t={r['t']:6.1f}s brain: "
+              f"{r['tool']}({json.dumps(r['args'], ensure_ascii=False)})")
+        if thought:
+            print(f"      brain 说明: {thought}")
+        print(f"      tool[{flag}]: {r['result'].replace(chr(10), ' ')}")
+    meta = d["meta"]
+    print(f"环境判定: {'PASS' if meta.get('success') else 'FAIL'}；"
+          f"结束原因: {meta.get('reason', '未记录')}")
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", default=str(config.EPISODES_DIR))
-    ap.add_argument("--replay", metavar="EP", help="导出回放视频, 如 ep_0000")
-    ap.add_argument("--decisions", metavar="EP", help="打印决策日志")
+    modes = ap.add_mutually_exclusive_group()
+    modes.add_argument("--replay", metavar="EP", help="用已保存的图片导出 MP4，不打开 GUI")
+    modes.add_argument("--decisions", metavar="EP", help="打印完整决策说明和工具反馈")
+    modes.add_argument("--meta", metavar="EP", help="打印本集 meta.json")
+    modes.add_argument("--frame", metavar="EP", help="打印一条原始轨迹状态，配合 --index")
+    ap.add_argument("--index", type=int, default=0, help="轨迹帧序号，从 0 开始")
     ap.add_argument("--cam", default="overhead")
     args = ap.parse_args()
     root = Path(args.root)
 
-    if args.decisions:
+    if args.meta:
+        meta = json.loads((root / args.meta / "meta.json").read_text(encoding="utf-8"))
+        print(json.dumps(meta, ensure_ascii=False, indent=2))
+    elif args.frame:
+        traj = load_ep(root / args.frame)["traj"]
+        if not 0 <= args.index < len(traj):
+            ap.error(f"--index 越界: 本集共 {len(traj)} 帧")
+        print(json.dumps(traj[args.index], ensure_ascii=False, indent=2))
+    elif args.decisions:
         show_decisions(root / args.decisions)
     elif args.replay:
         replay(root / args.replay, cam=args.cam)

@@ -13,8 +13,11 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import time
+from contextlib import ExitStack
 
-os.environ.setdefault("MUJOCO_GL", "egl")       # 必须在 import mujoco 之前
+os.environ.setdefault("MUJOCO_GL", "glfw" if sys.platform == "win32" or "--gui" in sys.argv
+                      else "egl")              # 必须在 import mujoco 之前
 
 import mujoco  # noqa: E402
 
@@ -40,108 +43,119 @@ def build_brain(name: str, env: MobileManipEnv):
 
 
 def run_episode(env, brain, tool_schemas, task_text, ep_dir, gui=None,
-                save_images: bool = True, verbose: bool = True) -> dict:
-    rig = CameraRig(env.model, cams=config.REC_CAMS) if save_images else None
-    capture = (lambda data: rig.render(data)) if rig else None
+                save_images: bool = True, verbose: bool = True,
+                seed: int | None = None) -> dict:
+    # LIFO 释放: 记录文件 → 录像相机. 环境相机由调用方 env.close() 释放.
+    with ExitStack() as resources:
+        rig = (resources.enter_context(CameraRig(env.model, cams=config.REC_CAMS))
+               if save_images else None)
+        capture = rig.render if rig else None
+        if hasattr(brain, "reset"):
+            brain.reset()
+        recorder = resources.enter_context(EpisodeRecorder(ep_dir, {
+            "task": task_text, "brain": brain.name, "task_kind": "pickball",
+            "seed": seed,
+        }, capture=capture))
 
-    def on_tick():
-        recorder.on_tick(env.model, env.data, env.robot)
-        if gui is not None:
-            gui.sync()
+        def on_tick():
+            recorder.on_tick(env.model, env.data, env.robot)
+            if gui is not None:
+                gui.sync()
 
-    tools = ToolLayer(env.robot.base, env.robot.arm, env.robot.hal, on_tick=on_tick)
-    if hasattr(brain, "reset"):
-        brain.reset()
-    recorder = EpisodeRecorder(ep_dir, {
-        "task": task_text,
-        "brain": brain.name,
-        "task_kind": "pickball",
-    }, capture=capture)
-
-    history: list[dict] = []
-    outcome = {"success": False, "decisions": 0, "reason": "决策数耗尽"}
-    done_called = False
-    for i in range(config.MAX_DECISIONS):
-        if gui is not None and not gui.is_running():
-            outcome["reason"] = "用户关闭窗口"
-            break
-        obs = env.get_obs()          # 大脑只看车头相机 (overhead 仅录制用)
-        obs["holding"] = env.robot.hal.attached_object() is not None
+        tools = ToolLayer(env.robot.base, env.robot.arm, env.robot.hal, on_tick=on_tick)
+        history: list[dict] = []
+        outcome = {"success": False, "brain_success": None, "decisions": 0,
+                   "decision_rounds": 0, "reason": "决策轮数耗尽"}
         try:
-            batch = brain.decide(obs, task_text, tool_schemas, history)
-        except Exception as e:                     # noqa: BLE001  API 异常不炸采集
-            print(f"  [!] brain 决策异常: {type(e).__name__}: {e}")
-            break
-        if isinstance(batch, Decision):
-            batch = [batch]
-        # 批量执行本轮回的所有工具调用
-        for decision in batch:
-            img_before = (recorder.snapshot_paths(env.data, "pre")
-                          if capture else None)
-            ok, result = tools.execute(decision.tool, decision.args)
-            img_after = (recorder.snapshot_paths(env.data, "post")
-                         if capture else None)
-            recorder.log_decision(t=env.data.time, thought=decision.thought,
-                                  tool=decision.tool, args=decision.args, ok=ok,
-                                  result=result, img_before=img_before,
-                                  img_after=img_after)
-            history.append({"tool": decision.tool, "args": decision.args,
-                            "ok": ok, "result": result})
-            if verbose:
-                print(f"  [{i+1:02d}] {decision.tool}({decision.args}) -> "
-                      f"{'OK' if ok else 'FAIL'}: {result[:80].replace(chr(10), ' ')}")
-            if decision.tool == "done":
-                break
-        if decision.tool == "done":
-            done_called = True
-            outcome["reason"] = f"brain 宣告完成 (success={decision.args.get('success')})"
-            break
-        if env.success():
-            outcome["reason"] = "环境判定成功"
-            break
-    else:
-        pass
+            for i in range(config.MAX_DECISIONS):
+                if gui is not None and not gui.is_running():
+                    outcome["reason"] = "用户关闭窗口"
+                    break
+                obs = env.get_obs()  # 车头相机; overhead 仅用于录制
+                obs["holding"] = env.robot.hal.attached_object() is not None
+                outcome["decision_rounds"] = i + 1
+                try:
+                    batch = brain.decide(obs, task_text, tool_schemas, history)
+                except Exception as e:          # API 异常仍保存本集
+                    outcome["reason"] = f"brain 决策异常: {type(e).__name__}: {e}"
+                    print(f"  [!] {outcome['reason']}")
+                    break
+                if isinstance(batch, Decision):
+                    batch = [batch]
+                if not batch:
+                    outcome["reason"] = "brain 未返回工具调用"
+                    break
+                done_called = False
+                for decision in batch:
+                    img_before = recorder.snapshot_paths(env.data, "pre") if capture else None
+                    ok, result = tools.execute(decision.tool, decision.args)
+                    img_after = recorder.snapshot_paths(env.data, "post") if capture else None
+                    recorder.log_decision(
+                        t=env.data.time, thought=decision.thought, tool=decision.tool,
+                        args=decision.args, ok=ok, result=result,
+                        img_before=img_before, img_after=img_after,
+                        extra={"decision_round": i + 1})
+                    history.append({"tool": decision.tool, "args": decision.args,
+                                    "ok": ok, "result": result})
+                    if verbose:
+                        print(f"  [动作{len(history):02d}/轮{i+1:02d}] brain: "
+                              f"{decision.tool}({decision.args})")
+                        print(f"      tool[{'OK' if ok else 'FAIL'}]: "
+                              f"{result.replace(chr(10), ' ')}")
+                    if decision.tool == "done":
+                        done_called = True
+                        outcome["brain_success"] = decision.args.get("success")
+                        outcome["reason"] = ("brain 请求结束 "
+                                             f"(自评 success={outcome['brain_success']})")
+                        break
+                if done_called:
+                    break
+                if env.success():
+                    outcome["reason"] = "环境判定成功"
+                    break
+            outcome["success"] = env.success()
+            outcome["decisions"] = len(history)
+            recorder.finish(outcome["success"], {
+                "reason": outcome["reason"], "brain_success": outcome["brain_success"],
+                "decision_rounds": outcome["decision_rounds"],
+                "t_sim": round(float(env.data.time), 2),
+            })
+        except BaseException as e:
+            recorder.finish(False, {"reason": f"采集中断: {type(e).__name__}",
+                                    "t_sim": round(float(env.data.time), 2)})
+            raise
+        return outcome
 
-    outcome["success"] = env.success()
-    outcome["decisions"] = len(history)
-    recorder.finish(outcome["success"], {
-        "reason": outcome["reason"],
-        "t_sim": round(float(env.data.time), 2),
-    })
-    if rig:
-        rig.close()
-    return outcome
 
-
-def main() -> None:
-    ap = argparse.ArgumentParser(description="openclaw_sim 数据采集")
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description="MuJoCo_Brain 数据采集")
     ap.add_argument("--brain", default="scripted",
                     choices=["scripted", "openai", "anthropic"])
     ap.add_argument("--episodes", type=int, default=3)
     ap.add_argument("--task", default=None, help="任务文本, 如 '把红色方块放进箱子'")
     ap.add_argument("--gui", action="store_true", help="打开 MuJoCo 交互窗口")
+    ap.add_argument("--keep-open", action="store_true", help="GUI 采集结束后保持最后画面，关闭窗口退出")
     ap.add_argument("--no-images", action="store_true", help="不存图(更快)")
     ap.add_argument("--out", default=str(config.EPISODES_DIR))
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--quiet", action="store_true")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
+    if args.episodes < 1:
+        ap.error("--episodes 必须至少为 1")
+    if args.keep_open and not args.gui:
+        ap.error("--keep-open 需要配合 --gui")
 
     config.ensure_dirs()
     task = parse_task(args.task) if args.task else parse_task("把0号网球捡起来放进收纳箱")
     task_text = args.task or task.text()
 
-    env = MobileManipEnv()
-    brain = build_brain(args.brain, env)
-    schemas = ToolLayer(env.robot.base, env.robot.arm, env.robot.hal).schemas_anthropic()
-
-    print(f"brain={brain.name} task='{task_text}' episodes={args.episodes} "
-          f"out={args.out}")
-    gui = None
-    if args.gui:
-        gui = GuiViewer(env.model, env.data)
-
     results = []
-    try:
+    with ExitStack() as resources:
+        env = resources.enter_context(MobileManipEnv())
+        brain = build_brain(args.brain, env)
+        schemas = ToolLayer(env.robot.base, env.robot.arm, env.robot.hal).schemas_anthropic()
+        print(f"brain={brain.name} task='{task_text}' episodes={args.episodes} out={args.out}")
+        gui = resources.enter_context(GuiViewer(env.model, env.data)) if args.gui else None
         for ep in range(args.episodes):
             env.reset(seed=args.seed + ep, task=task)
             if gui:
@@ -149,24 +163,22 @@ def main() -> None:
             ep_dir = next_episode_dir(args.out)
             print(f"\n== episode {ep+1}/{args.episodes} -> {ep_dir.name}")
             r = run_episode(env, brain, schemas, task_text, ep_dir, gui=gui,
-                            save_images=not args.no_images, verbose=not args.quiet)
+                            save_images=not args.no_images, verbose=not args.quiet,
+                            seed=args.seed + ep)
             results.append(r)
-            print(f"   结果: {'PASS' if r['success'] else 'FAIL'} "
-                  f"({r['reason']}, 决策 {r['decisions']} 次)")
-    finally:
-        if gui:
-            gui.close()
-
-    n_ok = sum(1 for r in results if r["success"])
-    print(f"\n===== 汇总: {n_ok}/{len(results)} 成功 =====")
-    code = 0 if n_ok == len(results) and results else 1
-    if args.gui:
-        # EGL 渲染器 + glfw viewer 在解释器拆卸阶段可能因 GL 上下文销毁顺序段错误,
-        # 任务与数据均已完整落盘, 这里跳过析构直接退出以保住退出码
-        sys.stdout.flush()
-        os._exit(code)
-    sys.exit(code)
+            print(f"   环境判定: {'PASS' if r['success'] else 'FAIL'} "
+                  f"({r['reason']}, 决策 {r['decision_rounds']} 轮 / 工具调用 {r['decisions']} 次)")
+            if gui is not None and not gui.is_running():
+                break
+        n_ok = sum(1 for r in results if r["success"])
+        print(f"\n===== 汇总: {n_ok}/{len(results)} 成功 =====")
+        if args.keep_open and gui.is_running():
+            print("采集已结束，窗口保留最后画面；关闭窗口退出。", flush=True)
+            while gui.is_running():
+                gui.sync()
+                time.sleep(0.02)
+    return 0 if n_ok == args.episodes else 1
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

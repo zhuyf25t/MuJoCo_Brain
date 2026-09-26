@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from contextlib import ExitStack
+
 import numpy as np
 import mujoco
 
@@ -15,10 +17,18 @@ class CameraRig:
                  cams: list[str] | None = None,
                  width: int = 640, height: int = 480):
         self.cams = cams or config.OBS_CAMS
-        self._renderers = {c: mujoco.Renderer(model, height=height, width=width)
-                           for c in self.cams}
-        self._cam_ids = {c: mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_CAMERA, c)
-                         for c in self.cams}
+        self._renderers = {}
+        self._cam_ids = {}
+        with ExitStack() as resources:
+            for cam in self.cams:
+                cid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_CAMERA, cam)
+                if cid < 0:
+                    raise ValueError(f"相机不存在: {cam}")
+                renderer = mujoco.Renderer(model, height=height, width=width)
+                resources.callback(renderer.close)
+                self._renderers[cam] = renderer
+                self._cam_ids[cam] = cid
+            self._resources = resources.pop_all()
 
     def render(self, data: mujoco.MjData) -> dict[str, np.ndarray]:
         out = {}
@@ -28,8 +38,13 @@ class CameraRig:
         return out
 
     def close(self) -> None:
-        for r in self._renderers.values():
-            r.close()
+        self._resources.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
 
 
 class GuiViewer:

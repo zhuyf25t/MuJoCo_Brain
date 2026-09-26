@@ -12,6 +12,7 @@ from __future__ import annotations
 import io
 import json
 import time
+from contextlib import ExitStack
 from pathlib import Path
 
 import numpy as np
@@ -35,9 +36,12 @@ class EpisodeRecorder:
         self.capture = capture          # () -> {cam: rgb}, 无则不存图
         self.meta = dict(meta)
         self.meta["t_wall_start"] = time.time()
-        (self.dir / "meta.json").write_text(json.dumps(self.meta, ensure_ascii=False, indent=2))
-        self._f_dec = open(self.dir / "decisions.jsonl", "a", encoding="utf-8")
-        self._f_traj = open(self.dir / "trajectory.jsonl", "a", encoding="utf-8")
+        (self.dir / "meta.json").write_text(
+            json.dumps(self.meta, ensure_ascii=False, indent=2), encoding="utf-8")
+        with ExitStack() as files:
+            self._f_dec = files.enter_context(open(self.dir / "decisions.jsonl", "a", encoding="utf-8"))
+            self._f_traj = files.enter_context(open(self.dir / "trajectory.jsonl", "a", encoding="utf-8"))
+            self._files = files.pop_all()
         self._frame = 0
         self._decision_i = 0
 
@@ -92,9 +96,20 @@ class EpisodeRecorder:
         self.meta["t_wall_end"] = time.time()
         if info:
             self.meta.update(info)
-        (self.dir / "meta.json").write_text(json.dumps(self.meta, ensure_ascii=False, indent=2))
-        self._f_dec.close()
-        self._f_traj.close()
+        try:
+            (self.dir / "meta.json").write_text(
+                json.dumps(self.meta, ensure_ascii=False, indent=2), encoding="utf-8")
+        finally:
+            self.close()
+
+    def close(self) -> None:
+        self._files.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
 
     def snapshot_paths(self, data, frame_tag: str) -> dict:
         """决策时刻的双相机快照(供 decisions.jsonl 引用)."""
