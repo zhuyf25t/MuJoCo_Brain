@@ -199,6 +199,48 @@ def test_one_way_prediction_cannot_enter_pick(make_brain):
     assert brain.state["phase"] == "pick"
 
 
+def test_refine_ball_region_retains_verified_arm_routes(make_brain):
+    correction = {"region": [.43, .5, .57, .6], "note": "同一低爪当前看见球仍在两指前方，修正候选位置"}
+    refine = plan(action("shoulder", delta=-.5), phase="pick", arm_view="grasp", grasp_region=correction)
+    brain, _ = make_brain(workflow()[:4] + [refine])
+    history = []
+    run_ticks(brain, history, 4)
+    prior = brain.state["calibration"]
+    tick(brain, history, 100)
+    current = brain.state["calibration"]
+    assert current["grasp"]["region"] == correction["region"]
+    assert current["grasp"]["frame"]["image_id"] != prior["grasp"]["frame"]["image_id"]
+    assert current["grasp"]["frame"] == brain.state["arm_anchor"]["frame"]
+    assert current["clearance"] == prior["clearance"] and current["moves"] == prior["moves"]
+    assert prior["grasp"]["region"] == GRASP["region"]
+
+
+@pytest.mark.parametrize("case", ["raised", "new_pose", "no_ball", "elbow_changed", "closed"])
+def test_region_correction_cannot_replace_new_pose_or_unseen_ball(case, make_brain):
+    bad = plan(phase="pick", arm_view="grasp", grasp_region=GRASP)
+    prefix = workflow()[:4]
+    views = [scene() for _ in range(6)]
+    if case == "raised":
+        bad["arm_view"] = "clearance"
+    elif case == "new_pose":
+        bad["grasp_reference"] = GRASP
+    elif case == "no_ball":
+        views[4]["ground_balls"] = []
+    elif case == "elbow_changed":
+        prefix.append(plan(action("elbow", delta=.1)))
+        bad["phase"] = "explore"
+    elif case == "closed":
+        prefix.append(plan(action("close_gripper"), phase="pick"))
+    brain, requests = make_brain(prefix + [bad, bad], scenes=views)
+    history = []
+    run_ticks(brain, history, len(prefix))
+    old_grasp = brain.state["calibration"]["grasp"]
+    batch = tick(brain, history, 180)
+    assert [d.tool for d in batch] == ["observe"]
+    assert brain.state["calibration"]["grasp"] == old_grasp
+    assert len(requests) == len(prefix) + 2
+
+
 @pytest.mark.parametrize("command", [action("elbow", delta=.1), action("arm_pose", pose="stow")])
 def test_changed_elbow_invalidates_moves_and_requires_reexploration(command, make_brain):
     brain, requests = make_brain(workflow()[:4] + [plan(command, phase="pick"), plan(command), plan(phase="pick"), plan()])

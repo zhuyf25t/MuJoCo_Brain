@@ -220,7 +220,8 @@ class LangGraphBrain(Brain):
                 "最近调用的指令": ctx.commands[-config.HISTORY_LINES:], "可用工具": tools}
         body["图像与历史文字的时间"] = ("最后一张才是唯一当前图。历史note/learning里的位置、大小以及‘当前’都是当时的描述，"
                                   "不能作为现在的球位置；先看最后一图，历史只用于比较变化和复用动作。")
-        body["抓球区域含义"] = "grasp.region约束球心应到哪里；它不是球的外接框，区域宽度不能当成球应有的直径。"
+        body["抓球区域含义"] = ("grasp.region是估计的球心接近位置，不是球的外接框或已证明能夹住的位置。"
+                                "首次抓取和抓空后，先降到低位取得球与实体夹指同图，再决定闭爪。")
         moves = state["calibration"]["moves"]
         if moves["to_clearance"] and not moves["to_grasp"]:
             body["待验证的降回动作（仅从就绪参考出发）"] = [
@@ -422,11 +423,21 @@ class LangGraphBrain(Brain):
             raise ValueError(f"{field} 需要非空文字依据")
         return value.strip()
 
+    def _grasp_ref(self, ref, ctx, field):
+        if not isinstance(ref, dict) or set(ref) != {"region", "note"}:
+            raise ValueError(f"{field} 需要 region 和 note")
+        box = ref["region"]
+        if (not isinstance(box, list) or len(box) != 4 or
+                any(type(v) not in (int, float) or not math.isfinite(v) or not 0 <= v <= 1 for v in box) or
+                not (box[0] < box[2] and box[1] < box[3])):
+            raise ValueError("region 需要 [left,top,right,bottom]，满足0到1且面积非零")
+        return {"frame": ctx.frame, "region": deepcopy(box), "note": self._text(ref["note"], field + ".note")}
+
     def _apply_plan(self, original, ctx, report):
         if not isinstance(report, dict):
             raise ValueError("计划必须是 JSON 对象")
         if set(report) - {"phase", "holding", "reason", "expected", "actions", "learning",
-                          "grasp_reference", "clearance_reference", "target", "arm_view", "release_check"}:
+                          "grasp_reference", "grasp_region", "clearance_reference", "target", "arm_view", "release_check"}:
             raise ValueError("计划包含未知字段，请按report_plan定义输出")
         if report.get("phase") not in STAGE_GOALS:
             raise ValueError("phase 必须为 explore/pick/place，表示当前证据支持的工作阶段")
@@ -460,14 +471,7 @@ class LangGraphBrain(Brain):
                 if (view == "held" or (gripper and gripper[-1] == "close_gripper") or
                     (view == "unclear" and not opened_without_possible_hold)):
                     raise ValueError("抓取几何参考须来自当前可见张爪；已执行open且无可能持球记录时可unclear，不能用本批张爪预测")
-                if not isinstance(ref, dict) or set(ref) != {"region", "note"}:
-                    raise ValueError("grasp_reference 需要 region 和 note")
-                box = ref["region"]
-                if (not isinstance(box, list) or len(box) != 4 or
-                    any(type(v) not in (int, float) or not math.isfinite(v) or not 0 <= v <= 1 for v in box) or
-                    not (box[0] < box[2] and box[1] < box[3])):
-                    raise ValueError("region 需要 [left,top,right,bottom]，满足0到1且面积非零")
-                ref = {"frame": ctx.frame, "region": box, "note": self._text(ref["note"], "grasp_reference.note")}
+                ref = self._grasp_ref(ref, ctx, "grasp_reference")
             calibration["grasp"], calibration["clearance"] = ref, None
             calibration["moves"] = {"to_grasp": None, "to_clearance": None}
             state["arm_anchor"] = {"pose": "grasp", "frame": ctx.frame} if ref else None
@@ -491,6 +495,15 @@ class LangGraphBrain(Brain):
                 state["arm_anchor"] = None
             calibration["clearance"] = ref
         self._observe_arm(state, ctx, report.get("arm_view"))
+        if "grasp_region" in report:
+            if ("grasp_reference" in report or "clearance_reference" in report or
+                    report.get("arm_view") != "grasp" or not calibration["grasp"] or
+                    not calibration["clearance"] or not all(calibration["moves"].values())):
+                raise ValueError("修正抓球区域须回到同一低位且原肩往返有效；不能同时更换姿态参考")
+            if may_hold or not gripper or gripper[-1] != "open_gripper" or not ctx.scene["ground_balls"]:
+                raise ValueError("修正抓球区域须当前已张爪、没有可能持球，并看见地面球；不能依据本批未来动作")
+            # A better estimate of where the ball belongs does not relearn the arm route.
+            calibration["grasp"] = self._grasp_ref(report["grasp_region"], ctx, "grasp_region")
         self._validate_release(original, ctx, report)
         phase = report["phase"]
         if names == ["done"] and actions[0]["args"]["success"]:
