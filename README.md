@@ -2,6 +2,8 @@
 
 基于 MuJoCo 的机器人智能体实验平台，支持可替换大脑、工具调用与仿真轨迹记录。
 
+命令与参数速查、输出文件及覆盖规则见 [README-simple.md](README-simple.md)。
+
 项目关注大脑、工具与环境之间的闭环:大脑根据观测选择动作，控制层执行动作，
 MuJoCo 推进物理模拟并生成新图像，记录器保存决策与轨迹。
 `scripted` 是用于验证流程的规则基线；`openai` 和 `anthropic` 是可替换的 LLM 接口。
@@ -311,8 +313,10 @@ Windows 虚拟环境并安装 `requirements.txt`；WSL 的 `.venv` 不能直接�
   decisions.jsonl 的 thought 字段(数据飞轮的一部分)
 
 两个 Brain 都:原生 tool-use 协议 → 文本 JSON 兜底解析 → 解析失败回喂错误重试 1 次 →
-仍失败安全回退原地重观察;**每轮观测自动内嵌车头相机图像与视觉感知结果**(无单独的
-look 工具);历史以单行摘要传递(不累积历史图);
+仍失败安全回退原地重观察；**每轮观测都会发送车头相机图片**（无单独的 look 工具）。
+OpenAI 兼容适配器另发送程序估算的视觉检测结果与本体状态；Anthropic 适配器当前
+发送底盘位姿、夹爪开度和 TCP 坐标，二者的文字摘要尚不完全一致。
+历史以单行摘要传递（不累积历史图）；
 工具名、参数、执行反馈和 brain 文本说明写入 `decisions.jsonl`；当前 LLM 文本说明
 最多保留 400 字符。API 的输入/输出 token 用量和请求耗时尚未记录。
 这里的 token 是模型处理内容的计量单位；请求耗时是实际等待 API 的时间，
@@ -327,7 +331,7 @@ LLM 输入/输出实时打印到终端,支持 Kitty 图形协议(Ghostty)内联�
 | `forward(seconds)` / `back(seconds)` | 直行/倒车 |
 | `turn_left(seconds)` / `turn_right(seconds)` | 原地转向(闭环, 里程计反馈) |
 | `arm_pose(pose)` | `stow` 行驶收纳 / `carry` 持球携带 / `reach` 下探抓取 / `drop` 投放 |
-| `shoulder(delta)` / `elbow(delta)` | 肩/肘关节微调(度) |
+| `shoulder(delta)` / `elbow(delta)` | 肩/肘关节微调(弧度) |
 | `open_gripper()` / `close_gripper()` | 手指开合(闭合要求真实接触球才算持有) |
 | `done(success)` | 宣告任务结束 |
 
@@ -344,7 +348,7 @@ LLM 每轮可一次产出**一批 tool call**,按顺序执行完再带着新观�
 data/episodes/ep_0042/
   meta.json          # task/brain/success/seed/时长/失败原因
   decisions.jsonl    # 决策级: {t, img_before/after, thought, tool, args, ok, result}
-  trajectory.jsonl   # 控制级 10Hz: {t, imgs(2路), qpos全量, base_pose, arm_qpos, gripper, ctrl}
+  trajectory.jsonl   # 控制级 10Hz: {t, imgs(2路), qpos全量, base_pose, arm_qpos, finger, ctrl}
   imgs/              # 000123_front_cam.jpg / 000123_overhead.jpg + 决策快照
 ```
 

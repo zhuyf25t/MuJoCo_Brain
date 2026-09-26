@@ -53,8 +53,9 @@ def main(argv=None) -> int:
     data = mujoco.MjData(model)
     apply_frame(model, data, frames[0])
     keys = SimpleQueue()
-    print("空格: 暂停/继续；R: 从头重播；鼠标可调整视角；关闭窗口退出。", flush=True)
+    print("正在创建 GUI 窗口；若长期停在这里，请检查 GLFW/WSLg 图形环境。", flush=True)
     with mj_viewer.launch_passive(model, data, key_callback=keys.put) as viewer:
+        print("GUI 已打开。空格: 暂停/继续；R: 从头重播；鼠标可调整视角；关闭窗口退出。", flush=True)
         with viewer.lock():
             viewer.cam.lookat[:] = [0.55, 0.0, 0.55]
             viewer.cam.distance = 3.0

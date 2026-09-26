@@ -155,7 +155,11 @@ def main(argv=None) -> int:
         brain = build_brain(args.brain, env)
         schemas = ToolLayer(env.robot.base, env.robot.arm, env.robot.hal).schemas_anthropic()
         print(f"brain={brain.name} task='{task_text}' episodes={args.episodes} out={args.out}")
-        gui = resources.enter_context(GuiViewer(env.model, env.data)) if args.gui else None
+        gui = None
+        if args.gui:
+            print("正在创建 GUI 窗口；若长期停在这里，请检查 GLFW/WSLg 图形环境。", flush=True)
+            gui = resources.enter_context(GuiViewer(env.model, env.data))
+            print("GUI 已打开，开始采集。", flush=True)
         for ep in range(args.episodes):
             env.reset(seed=args.seed + ep, task=task)
             if gui:
