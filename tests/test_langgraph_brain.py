@@ -1,5 +1,6 @@
 """Graph/collector contracts with mock replies, NOT evidence of visual skill."""
 
+from collections import deque
 from copy import deepcopy
 import json
 import sqlite3
@@ -31,6 +32,19 @@ GRASP = {"region": [.44, .72, .56, .88], "note": "测试假设：实体张爪接
 
 CLEARANCE = {"save_current": True, "note": "爪已离地让开视线，肘未调整"}
 RELEASE = {"above_rim": True, "inside_opening": True, "evidence": "测试假设：接近前后图确认球越过近沿且高于箱口"}
+
+
+def scene(holding="empty", release_view="unclear"):
+    return {"ground_balls": [{"center": [.5, .3], "description": "上方地面的球"}],
+            "gripper": "测试用的独立实体手指观测", "holding": holding,
+            "release_view": release_view, "evidence": "测试用的当前图空间关系"}
+
+
+class RequestLog(list):
+    """Keep the existing planning-contract assertions separate from observation IO."""
+    def __init__(self):
+        super().__init__()
+        self.observations = []
 
 
 def workflow():
@@ -67,16 +81,24 @@ def make_brain(monkeypatch, tmp_path):
         monkeypatch.setattr(config, name, value)
     brains = []
 
-    def create(plans=None, *, db_path=None, raw=False):
-        requests = []
-        queue = iter(plans) if plans is not None else None
+    def create(plans=None, *, db_path=None, raw=False, scenes=None):
+        requests = RequestLog()
+        queue = deque(plans) if plans is not None else None
+        views = iter(scenes) if scenes is not None else None
 
         def respond(request):
             assert request.url.host == "mock.invalid"
-            requests.append(json.loads(request.content))
-            result = next(queue) if queue is not None else plan(action("shoulder", delta=.1))
+            body = json.loads(request.content)
+            name = body["tools"][0]["function"]["name"]
+            if name == "describe_scene":
+                requests.observations.append(body)
+                planned_hold = queue[0].get("holding", "empty") if queue else "empty"
+                result = next(views) if views is not None else scene(planned_hold, "candidate" if planned_hold == "held" else "unclear")
+            else:
+                requests.append(body)
+                result = queue.popleft() if queue is not None else plan(action("shoulder", delta=.1))
             message = {"content": json.dumps(result)} if raw else {"tool_calls": [
-                {"function": {"name": "report_plan", "arguments": json.dumps(result)}}]}
+                {"function": {"name": name, "arguments": json.dumps(result)}}]}
             return httpx.Response(200, json={"choices": [{"message": message}]})
 
         folder = tmp_path / f"brain-{len(brains)}"
@@ -231,6 +253,8 @@ def test_private_truth_never_changes_requests_or_state(make_brain):
         for entry in hb: entry.update(ok=False, result="SECRET_SIM_TRUTH", thought="PRIVATE_THOUGHT")
         assert tick(a, ha, i * 20) == tick(b, hb, observation=changed)
     assert req_a == req_b and a.state == b.state and "SECRET_SIM_TRUTH" not in json.dumps(req_b)
+    assert req_a.observations == req_b.observations
+    assert "SECRET_SIM_TRUTH" not in json.dumps(req_b.observations)
     assert encode_image_block(changed["images"]["front"], fmt="openai") in req_b[-1]["messages"][1]["content"]
     snapshot = a.state; snapshot["calibration"]["grasp"]["note"] = "changed"
     assert a.state["calibration"]["grasp"]["note"] != "changed"
@@ -371,9 +395,75 @@ def test_current_image_is_last_even_when_identical_to_a_historical_reference(mak
         tick(brain, history, value)
     for request, value in zip(requests, (0, 20, 20, 60)):
         content = request["messages"][1]["content"]
-        assert content[-1] == encode_image_block(obs(value)["images"]["front"], fmt="openai")
-        assert content[-2]["text"].startswith("唯一当前图")
+        assert content[-2] == encode_image_block(obs(value)["images"]["front"], fmt="openai")
+        assert content[-3]["text"].startswith("唯一当前图")
+        assert content[-1]["text"].startswith("current_scene")
         blocks = [p for p in content if p["type"] == "image_url"]
         assert len(blocks) == len({p["image_url"]["url"] for p in blocks})
     # Same pixels as the low reference do not make the latest observation historical.
-    assert "已调用动作数=4" in requests[2]["messages"][1]["content"][-2]["text"]
+    assert "已调用动作数=4" in requests[2]["messages"][1]["content"][-3]["text"]
+
+
+@pytest.mark.parametrize("verdict", ["blocked", "unclear"])
+def test_independent_scene_denies_release_and_empty_claim_on_retry(verdict, make_brain):
+    release = workflow()[6]
+    claim_empty = plan(action("open_gripper"), phase="place", holding="empty")
+    views = [scene(p["holding"], "candidate" if p["holding"] == "held" else "unclear") for p in workflow()[:6]]
+    views.append(scene("unclear", verdict))
+    brain, requests = make_brain(workflow()[:6] + [release, claim_empty], scenes=views)
+    batches = run_ticks(brain, [], 7)
+    assert [d.tool for d in batches[-1]] == ["observe"]
+    assert brain.state["visual_memory"]["held"] and brain.state["phase"] == "place"
+    assert len(requests.observations) == 7 and len(requests) == 8
+    trace = json.loads((brain.trace_dir / "rounds.jsonl").read_text(encoding="utf-8").splitlines()[-1])
+    assert trace["current_scene"]["release_view"] == verdict
+    assert [r["kind"] for r in trace["requests"]] == ["observation", "plan", "plan"]
+
+
+def test_observation_only_receives_current_image_and_reuses_identical_pixels(make_brain):
+    brain, requests = make_brain([plan(action("shoulder", delta=.1), learning="OLD_TARGET_PRIVATE"), plan()])
+    history = []
+    tick(brain, history, 20)
+    tick(brain, history, 20)
+    assert len(requests.observations) == 1 and len(requests) == 2
+    observation = requests.observations[0]
+    assert len(observation["messages"]) == 2
+    assert observation["messages"][1]["content"] == [
+        {"type": "text", "text": "只描述这一张当前图，调用describe_scene。"},
+        encode_image_block(obs(20)["images"]["front"], fmt="openai")]
+    assert "TASK" not in json.dumps(observation) and "OLD_TARGET_PRIVATE" not in json.dumps(observation)
+    rows = [json.loads(s) for s in (brain.trace_dir / "rounds.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert rows[-1]["scene_reused"] and rows[-1]["current_scene"] == rows[0]["current_scene"]
+
+
+@pytest.mark.parametrize("invalid", [{}, {**scene(), "holding": "possibly"},
+                                    {**scene(), "ground_balls": [{"center": [1.2, .3], "description": "越界"}]}])
+def test_invalid_observation_does_not_plan_or_default_to_empty(invalid, make_brain):
+    brain, requests = make_brain([plan(action("open_gripper"))], scenes=[invalid])
+    assert tick(brain, [])[0].tool == "observe"
+    assert not requests and len(requests.observations) == 1
+    assert brain.state["visual_memory"]["held"] is None
+
+
+def test_independent_empty_allows_preparation_after_failed_grasp(make_brain):
+    first = plan(action("close_gripper"))
+    prepare = plan(action("open_gripper"), holding="empty")
+    brain, requests = make_brain([first, prepare], scenes=[scene(), scene("empty", "blocked")])
+    batches = run_ticks(brain, [], 2)
+    assert [d.tool for d in batches[-1]] == ["open_gripper"]
+
+
+def test_fresh_observer_held_cannot_release_without_history_or_candidate(make_brain):
+    bad = plan(action("open_gripper"), holding="empty")
+    brain, requests = make_brain([bad, bad], scenes=[scene("held", "blocked")])
+    assert tick(brain, [])[0].tool == "observe"
+    assert len(requests.observations) == 1 and len(requests) == 2
+
+
+def test_observed_held_is_remembered_when_planner_is_uncertain_across_rounds(make_brain):
+    look = plan(action("shoulder", delta=.1), holding="unclear")
+    release = plan(action("open_gripper"), holding="empty")
+    brain, requests = make_brain([look, release, release], scenes=[scene("held"), scene("unclear")])
+    batches = run_ticks(brain, [], 2)
+    assert [d.tool for d in batches[-1]] == ["observe"]
+    assert brain.state["visual_memory"]["held"]

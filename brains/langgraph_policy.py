@@ -4,6 +4,36 @@
 本模块不执行工具、不更新状态；图与校验实现位于 langgraph_brain.py。
 """
 
+CURRENT_VIEW_PROMPT = """你只负责看这一张当前车头照片，不知道过去的动作、任务进度和模型结论，也不安排机器人动作。
+图片左上角为(0,0)，右下角为(1,1)，x向右增加、y向下增加。先辨认物体在画面上部、中部还是下部，再给出近似坐标。
+地面上的绿色/黄绿色圆球才列入ground_balls。阴影不是球，橙色/棕色连杆不是球。
+车头上方伸出的机器人末端可能有橙棕色横掌、两根较细的深红色手指；这组结构是夹爪，不是底盘支腿。gripper用普通话说清楚真正的手指、指间开口在哪里，能否看清，与地面和影子是什么关系。
+holding=held只在看见绿色球由实体手指夹着且离地时使用；empty需要看见指间空间确实为空；遮挡、球与手指只是投影重叠、看不到手指时填unclear。不要把“没看见绿色”当空爪。
+若同时看见夹爪处的球和洋红箱子，区分顶部开口、亮色近侧箱沿、面向相机的整片竖直外壁。
+release_view=blocked：图中有不能释放的明确证据，例如球挡在箱子外侧竖直壁前、球的下缘仍低于近沿，或球在箱子旁边。
+release_view=candidate：当前图明确支持整颗球高过近沿、落点越过近沿进入开口内部且有球大小的余量。它只表示本图没有否决证据，不代表已由单图证明三维位置。
+release_view=unclear：没有同时看清球和箱口，或高度、前后关系仍不能确定。球与箱子在图中重叠不够；不能因为希望放球就填candidate。
+evidence说明你在图中具体看见的关系。只报告可见事实与不确定处，不猜测已执行过什么，也不复述任务目标。
+"""
+
+
+def scene_tool():
+    return {"type": "function", "function": {"name": "describe_scene",
+        "description": "只根据这一张当前图片报告物体和空间关系，不作动作规划。",
+        "parameters": {"type": "object", "additionalProperties": False,
+            "required": ["ground_balls", "gripper", "holding", "release_view", "evidence"],
+            "properties": {
+                "ground_balls": {"type": "array", "items": {"type": "object", "additionalProperties": False,
+                    "required": ["center", "description"], "properties": {
+                        "center": {"type": "array", "minItems": 2, "maxItems": 2,
+                            "items": {"type": "number", "minimum": 0, "maximum": 1}},
+                        "description": {"type": "string", "minLength": 1}}}},
+                "gripper": {"type": "string", "minLength": 1},
+                "holding": {"type": "string", "enum": ["held", "empty", "unclear"]},
+                "release_view": {"type": "string", "enum": ["blocked", "candidate", "unclear"]},
+                "evidence": {"type": "string", "minLength": 1}}}}}
+
+
 STAGE_GOALS = {
     "explore": """探索：学会一套能重复使用的抓球动作。
 你要弄清楚三件事：低处怎样摆爪才能夹地上的球；球心来到画面哪里值得抓；怎样抬起看路、再降回去抓。
@@ -85,6 +115,8 @@ COMMON_PROMPT = """你是捡球小车的大脑，任务是把一颗绿色/黄绿
 
 你能看见什么、能控制什么：
 相机固定在车头，不在机械臂上。你收到当前车头图、明确标记的历史图、工具定义、自己下发过的指令和记忆。
+current_scene是另一次只看当前图、不读历史和计划的独立观测。它也可能不确定，但不能用旧位置、上批希望发生的事或剩余轮数覆盖它。球在哪里优先以这份当下观测为依据；与参考图比较后再决定动作。
+所有图片坐标以左上(0,0)、右下(1,1)为准，x向右增加、y向下增加。图上越低y越大；不能用左下为原点的数学坐标。
 最后一张标为“唯一当前图”的图片才是现在的场景。前面的上批、低位、就绪、目标和持球图片全是历史；先辨认最后一张图的球与真实手指，再用旧图比较变化。历史文字里的“当前”、球坐标或大小指的是当时，不能照抄来描述现在，也不能把不同时间的物体拼成一幅当前场景。
 没有实际关节角、距离、位姿、持球传感器、工具成功反馈或数值标定。橙色/棕色连杆、圆关节和掌部都是机器人，不是网球。
 夹爪固定在小臂末端，没有独立腕关节。肩和肘都可能同时改变爪的位置和朝向；固定肘抬肩时，爪也会转动，返回低位后才应恢复抓球朝向。
@@ -118,6 +150,8 @@ arm_view每轮描述当前相对照片的爪形态：grasp=回到低位形态，
 
 输出字段和照片的对应关系：
 learning只补充本轮新看到的事实和仍不确定处，系统保留最近四条，稳定的肩往返经验另存在moves，不需要在文字里反复总结。未执行的预测只写expected；尚未松爪时不能把“已经学会投放”写成经验。同批肩肘都动了，只能说组合效果。没有动作历史时不编造已学经验。
+当前球的坐标、数量和现在在哪里由current_scene每轮重读，不要再抄进learning。learning保留动作方向、动作前后发生的变化和待解决的问题，避免旧场景文字冒充当前观测。
+释放还受current_scene约束：blocked或unclear不能用你自己填的release_check=true消除。可能持球时，独立观测没有确认empty，就不能改报empty来张爪；先保持闭爪，完成抬高、接近或改善观察的目的，等新图。判断被否决不是任务失败，不因此done，也不因轮数少就释放。
 grasp_reference={region:[left,top,right,bottom],note:...}保存当前可见的低位张爪图和可抓球心区域，坐标归一化到0到1；note说明手指、地面和影子提供的依据。
 已执行张爪且没有可能持球记录时，可以在holding=unclear下保存能辨认的张爪几何参考；这不等于确认空爪。只有关节或影子、当前闭爪或仍可能持球时，不能保存这个参考。
 clearance_reference={save_current:true,note:...}保存当前已经看清前方、夹爪离地的就绪图；note说明视线怎样变清楚，肘是否保持原位。系统记录从最近低位到本图的肩动作，之后还需验证返回方向。

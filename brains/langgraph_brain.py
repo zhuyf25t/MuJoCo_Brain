@@ -26,7 +26,7 @@ except ModuleNotFoundError as exc:
 
 import config
 from .base import Brain, Decision
-from .langgraph_policy import COMMON_PROMPT, STAGE_GOALS, plan_tool
+from .langgraph_policy import COMMON_PROMPT, CURRENT_VIEW_PROMPT, STAGE_GOALS, plan_tool, scene_tool
 from .llm_common import llm_log, term_show_image
 from .openai_compat import OpenAICompatBrain
 
@@ -60,6 +60,8 @@ class RoundContext:
     entry_node: str = ""
     decisions: list[Decision] = field(default_factory=list)
     requests: list[dict] = field(default_factory=list)
+    scene: dict | None = None
+    scene_reused: bool = False
 
 
 class LangGraphBrain(Brain):
@@ -80,6 +82,7 @@ class LangGraphBrain(Brain):
     def reset(self):
         """The existing collector calls this at each episode; initialize on its first frame."""
         self._fresh, self._round = True, 0
+        self._scene_cache = None
 
     def _start_episode(self):
         self.memory.open()
@@ -146,10 +149,20 @@ class LangGraphBrain(Brain):
         # Its failed pushes are excluded from a subsequent lift, without reading ok/qpos.
         state["arm_anchor"] = {"pose": view, "frame": ctx.frame}
 
+    @staticmethod
+    def _may_hold(state, ctx, report):
+        gripper = [c["tool"] for c in ctx.commands if c["tool"] in {"open_gripper", "close_gripper"}]
+        return (bool(state["visual_memory"]["held"]) or bool(gripper and gripper[-1] == "close_gripper") or
+                ctx.scene["holding"] == "held" or report["holding"] == "held")
+
     def _validate_release(self, original, ctx, report):
         names = [a["tool"] for a in report["actions"]]
-        if "open_gripper" not in names or report["holding"] != "held":
+        if "open_gripper" not in names or not self._may_hold(original, ctx, report):
             return
+        if ctx.scene["holding"] == "empty":
+            return  # An independent current view allows preparation after an empty grasp.
+        if ctx.scene["release_view"] != "candidate":
+            raise ValueError("独立当前图观测不支持释放：" + ctx.scene["evidence"] + "。保持闭爪，先解决高度、前后位置或观察问题")
         if report["phase"] != "place":
             raise ValueError("持球松爪属于place，先确认投放位置")
         if any(n in POSITION_TOOLS for n in names[:names.index("open_gripper")]):
@@ -171,11 +184,14 @@ class LangGraphBrain(Brain):
         candidates = []
         if state["last_batch"]:
             candidates.append(("历史：上批动作前图", state["last_batch"]["before"]))
-        for key, label in (("grasp", "张爪朝下、靠近地面的抓球参考"), ("clearance", "抬肩后能看球看路的就绪参考")):
+        pose_refs = () if state["phase"] == "place" else (("grasp", "张爪朝下、靠近地面的抓球参考"), ("clearance", "抬肩后能看球看路的就绪参考"))
+        for key, label in pose_refs:
             if state["calibration"][key]:
                 candidates.append(("历史：" + label, state["calibration"][key]["frame"]))
         for key, label in (("held", "最近清楚的持球证据"), ("target", "上次目标所在图")):
             if state["visual_memory"][key]:
+                if key == "target" and state["visual_memory"][key]["kind"] == "ball":
+                    continue  # A previous ball scene is not a current target measurement.
                 candidates.append(("历史：" + label, state["visual_memory"][key]["frame"]))
         current_label = "唯一当前图（本轮决策依据；前面的图片全是历史）"
         candidates.append((current_label, ctx.frame))
@@ -215,6 +231,9 @@ class LangGraphBrain(Brain):
         for label, frame in images:
             content.extend([{"type": "text", "text": f"{label}；已调用动作数={frame['history_n']}"},
                             self.memory.image_block(frame)])
+        content.append({"type": "text", "text": "current_scene（独立只看最后这张当前图得到；不是历史或动作预测）：" +
+                        json.dumps(ctx.scene, ensure_ascii=False) +
+                        "\n先根据这份当前观测说明下一批的目的。历史只用来比较动作效果，不能把旧球位置当成现在。"})
         # Include adjacent goals so a visually confirmed boundary needs no second model call.
         goals = "\n\n".join(f"{name}: {goal}" for name, goal in STAGE_GOALS.items())
         messages = [{"role": "system", "content": COMMON_PROMPT + "\n阶段目标：\n" + goals +
@@ -235,10 +254,20 @@ class LangGraphBrain(Brain):
     def _plan(self, state, ctx, entry_node):
         ctx.entry_node = entry_node
         state = self._consume_batch(state, ctx.commands)
+        try:
+            self._read_scene(ctx)
+        except (ValueError, TypeError, KeyError) as exc:
+            return self._emit_batch(state, ctx, [{"tool": "observe", "args": {}}],
+                                    "当前图观测格式不完整，先保持姿态重新观察", str(exc))
+        # Preserve direct visual evidence even if the planner is uncertain or malformed.
+        if ctx.scene["holding"] == "held":
+            state["visual_memory"]["held"] = {"frame": ctx.frame, "note": ctx.scene["gripper"]}
+        elif ctx.scene["holding"] == "empty":
+            state["visual_memory"]["held"] = None
         note = ""
-        for _ in range(2):  # Normally one request; malformed plans get one correction, no movement.
+        for _ in range(2):  # One planner request plus one correction; the observation is fixed.
             messages, tool, images = self._messages(state, ctx, note)
-            request = {"phase": state["phase"], "messages": self.memory.archive_messages(messages, images), "tools": [tool]}
+            request = {"kind": "plan", "phase": state["phase"], "messages": self.memory.archive_messages(messages, images), "tools": [tool]}
             ctx.requests.append(request)
             started = time.monotonic()
             try:
@@ -261,16 +290,62 @@ class LangGraphBrain(Brain):
                                 "计划未通过校验，原位重观察", "保持姿态，下轮修正计划。" + note)
 
     @staticmethod
-    def _parse(message):
+    def _parse(message, name="report_plan"):
         calls = message.get("tool_calls") or []
         if calls:
-            if len(calls) != 1 or calls[0].get("function", {}).get("name") != "report_plan":
-                raise ValueError("请调用一次 report_plan，把多个动作放入 actions")
+            if len(calls) != 1 or calls[0].get("function", {}).get("name") != name:
+                raise ValueError(f"请调用一次 {name}")
             return json.loads(calls[0]["function"].get("arguments", "{}"))
         text = (message.get("content") or "").strip()
         if text.startswith("```"):
             text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
         return json.loads(text)
+
+    def _read_scene(self, ctx):
+        if self._scene_cache and self._scene_cache[0] == ctx.frame["image_id"]:
+            ctx.scene, ctx.scene_reused = deepcopy(self._scene_cache[1]), True
+            return
+        images = [["唯一当前图", ctx.frame]]
+        messages = [{"role": "system", "content": CURRENT_VIEW_PROMPT}, {"role": "user", "content": [
+            {"type": "text", "text": "只描述这一张当前图，调用describe_scene。"}, self.memory.image_block(ctx.frame)]}]
+        tool = scene_tool()
+        request = {"kind": "observation", "messages": self.memory.archive_messages(messages, images), "tools": [tool]}
+        ctx.requests.append(request)
+        started = time.monotonic()
+        try:
+            data = self.llm._request(messages, [tool])
+            msg = data.get("choices", [{}])[0].get("message", {})
+            request.update(reply=msg.get("tool_calls") or msg.get("content"), usage=data.get("usage"))
+            scene = self._parse(msg, "describe_scene")
+            self._validate_scene(scene)
+            ctx.scene = scene
+            self._scene_cache = (ctx.frame["image_id"], deepcopy(scene))
+        except (ValueError, TypeError, KeyError) as exc:
+            request["validation_error"] = str(exc)
+            raise
+        except Exception as exc:
+            request["error"] = type(exc).__name__
+            raise
+        finally:
+            request["elapsed_s"] = round(time.monotonic() - started, 3)
+
+    def _validate_scene(self, scene):
+        if not isinstance(scene, dict) or set(scene) != {"ground_balls", "gripper", "holding", "release_view", "evidence"}:
+            raise ValueError("独立观测字段缺失或多余")
+        if scene["holding"] not in {"held", "empty", "unclear"} or scene["release_view"] not in {"blocked", "candidate", "unclear"}:
+            raise ValueError("独立观测的夹持或释放关系不合法")
+        self._text(scene["gripper"], "scene.gripper")
+        self._text(scene["evidence"], "scene.evidence")
+        if not isinstance(scene["ground_balls"], list):
+            raise ValueError("ground_balls必须是列表")
+        for ball in scene["ground_balls"]:
+            if not isinstance(ball, dict) or set(ball) != {"center", "description"}:
+                raise ValueError("地面球需要center和description")
+            center = ball["center"]
+            if (not isinstance(center, list) or len(center) != 2 or
+                    any(type(v) not in (int, float) or not math.isfinite(v) or not 0 <= v <= 1 for v in center)):
+                raise ValueError("球心须为左上原点、0到1的[x,y]")
+            self._text(ball["description"], "scene.ball.description")
 
     @staticmethod
     def _validate_actions(actions, schemas):
@@ -330,9 +405,13 @@ class LangGraphBrain(Brain):
         calibration = state["calibration"]
         view = report["holding"]
         gripper = [c["tool"] for c in ctx.commands if c["tool"] in {"open_gripper", "close_gripper"}]
-        may_hold = bool(state["visual_memory"]["held"]) or bool(gripper and gripper[-1] == "close_gripper")
+        may_hold = self._may_hold(state, ctx, report)
+        if may_hold and view == "empty" and ctx.scene["holding"] != "empty":
+            raise ValueError("独立当前图没有确认空爪，不能用规划中的empty清除可能持球；先保持闭爪改善观察")
+        if view == "held" and ctx.scene["holding"] == "empty":
+            raise ValueError("独立当前图报告空爪，不能直接声称持球；先核对图片、改善观察")
         if "open_gripper" in names and view == "unclear":
-            if may_hold:
+            if may_hold and ctx.scene["holding"] != "empty":
                 raise ValueError("可能持球且当前看不清，不能用张爪检查；先保持闭爪改善视野")
         if "learning" in report and state["last_batch"] is not None:
             lesson = {"text": self._text(report["learning"], "learning"), "through_history_n": len(ctx.commands)}
@@ -441,9 +520,10 @@ class LangGraphBrain(Brain):
                 raise RuntimeError("图未产生动作批次")
             self._round = ctx.round_no
         finally:
-            self.memory.log({"format_version": 4, "round": ctx.round_no, "model": self.llm.model,
+            self.memory.log({"format_version": 5, "round": ctx.round_no, "model": self.llm.model,
                              "entry_node": ctx.entry_node, "action_phase": self.state.get("phase"),
-                             "current_frame": ctx.frame, "state_before": before, "state_after": self.state,
+                             "current_frame": ctx.frame, "current_scene": ctx.scene, "scene_reused": ctx.scene_reused,
+                             "state_before": before, "state_after": self.state,
                              "requests": ctx.requests, "decisions": [asdict(d) for d in ctx.decisions]})
         phase = self.state["phase"]
         labels = {"explore": "探索", "pick": "捡球", "place": "投放"}
