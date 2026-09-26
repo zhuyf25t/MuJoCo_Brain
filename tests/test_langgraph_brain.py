@@ -523,9 +523,10 @@ def planner_scene(request):
     return json.loads(request["messages"][1]["content"][-1]["text"].split("：", 1)[1].split("\n", 1)[0])
 
 
-def test_calibration_probe_only_projects_geometry_and_preserves_base_cache(make_brain):
+@pytest.mark.parametrize("probe_holding", ["empty", "unclear"])
+def test_calibration_probe_only_projects_geometry_and_preserves_base_cache(probe_holding, make_brain):
     base = {**scene("unclear", "blocked"), "gripper": "BASE_SHADOW_IDENTITY", "evidence": "BASE_SHADOW_EVIDENCE"}
-    probe = {**scene("empty", "candidate"), "gripper": "TOP_REAL_JAWS_EMPTY_CLAIM",
+    probe = {**scene(probe_holding, "candidate"), "gripper": "TOP_REAL_JAWS_WITH_VISIBLE_OPENING",
              "ground_balls": [{"center": [.9, .9], "description": "WRONG_PROBE_BALL"}], "evidence": "WRONG_PROBE_RELEASE"}
     brain, requests = make_brain([plan(action("open_gripper")), plan(holding="unclear"), plan(holding="unclear")],
                                 scenes=[scene(), base], gripper_scenes=[probe])
@@ -546,7 +547,7 @@ def test_calibration_probe_only_projects_geometry_and_preserves_base_cache(make_
 
 
 def test_same_pixels_entering_pick_use_unmodified_base_without_new_observation(make_brain):
-    brain, requests = make_brain(workflow()[:5])
+    brain, requests = make_brain(workflow()[:5], gripper_scenes=[scene("unclear")] * 3)
     history = []
     for value in (0, 20, 40, 60, 60):
         tick(brain, history, value)
@@ -559,14 +560,14 @@ def test_same_pixels_entering_pick_use_unmodified_base_without_new_observation(m
 
 def test_close_then_open_in_explore_does_not_reenable_initial_geometry_probe(make_brain):
     brain, requests = make_brain([plan(action("open_gripper")), plan(action("close_gripper")),
-                                 plan(action("open_gripper")), plan()])
+                                 plan(action("open_gripper")), plan()], gripper_scenes=[scene("unclear")])
     run_ticks(brain, [], 4)
     assert len(requests.gripper_observations) == 1
     assert brain.state["phase"] == "explore"
     assert planner_scene(requests[-1]) == scene()
 
 
-@pytest.mark.parametrize("probe", [{}, scene("held"), scene("unclear")])
+@pytest.mark.parametrize("probe", [{}, scene("held")])
 def test_unaccepted_geometry_probe_leaves_valid_base_scene_usable(probe, make_brain):
     brain, requests = make_brain([plan(action("open_gripper")), plan(action("shoulder", delta=.1))],
                                 gripper_scenes=[probe])

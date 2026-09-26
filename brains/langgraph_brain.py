@@ -345,7 +345,9 @@ class LangGraphBrain(Brain):
             self._gripper_cache = (ctx.frame["image_id"], None)
             return  # An optional shape reading cannot invalidate a valid base scene.
         # Never replace holding, release evidence or coordinates with this probe.
-        ctx.calibration_gripper = report["gripper"] if report["holding"] == "empty" else None
+        # A cropped opening can make occupancy unclear while the visible jaws
+        # are identifiable. Initial-calibration eligibility is checked by _plan.
+        ctx.calibration_gripper = report["gripper"] if report["holding"] in {"empty", "unclear"} else None
         self._gripper_cache = (ctx.frame["image_id"], ctx.calibration_gripper)
 
     def _describe_current(self, ctx, prompt, kind):
