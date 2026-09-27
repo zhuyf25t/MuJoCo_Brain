@@ -197,6 +197,7 @@ calibration.moves.to_clearance和to_grasp分别存低位到就绪、就绪到低
 系统只记录两个已辨认姿态之间、车身不动且只有同方向肩动作（可有observe）的片段。若混入底盘、开合爪、肘或预设动作，就不能把组合结果算成肩的独立效果。
 arm_anchor是最近一次从图像认出的grasp/clearance及当时照片；它不是现在的关节位置。途中可能又动过肩，当前要重新看图。改肘或调用预设会清空moves，但保留旧照片用于比较。
 arm_view每轮描述当前相对照片的爪形态：grasp=回到低位形态，clearance=回到就绪形态，other=看得见但处在其他位置，unclear=没有足够证据。比较看爪相对车头的形态，不要求球和背景不变。只有地面影子不能报grasp。
+本轮保存新的非空grasp_reference时，当前图本身就成为新的候选参考，系统据此记录当前对应grasp，无需再用arm_view重复证明它匹配自己。候选的离地间隙、是否适合抓球仍可能未知，保留在note；这不会建立肩的往返动作。没有保存新参考、只是返回旧参考时，仍须根据图片如实报告arm_view。
 从就绪返回低位后，只需arm_view=grasp来确认，不要重复保存grasp_reference；重新保存意味着开始一套新方法，会清空旧就绪图和双向动作。
 （一种可行方式：若按已学动作却明显对不上照片，回explore，clearance_reference=null废弃往返关系，再认出低位或重新保存低位；肘固定后重建两个方向。不要凭历史指令算出一个所谓“当前角度”（仅供参考））
 
@@ -238,7 +239,7 @@ def plan_tool(tool_names):
                 "phase": {"type": "string", "enum": list(STAGE_GOALS)},
                 "holding": {"type": "string", "enum": ["held", "empty", "unclear"]},
                 "arm_view": {"type": "string", "enum": ["grasp", "clearance", "other", "unclear"],
-                             "description": "当前图片中的爪相对参考姿态；不能由指令累计或影子断言到位"},
+                             "description": "当前爪相对已有参考的姿态；本轮保存新的非空grasp_reference后，系统以当前图作为新grasp基准，这不证明已可抓球。普通返回旧参考仍须看图判断，不能由指令累计或影子断言到位；保存clearance_reference时须填clearance"},
                 "reason": text, "expected": text,
                 "learning": {**text, "description": "本轮新观察的经验或不确定处；稳定肩动作由系统单独保留"},
                 "review": {"type": "object", "additionalProperties": False,

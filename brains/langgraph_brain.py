@@ -592,6 +592,9 @@ class LangGraphBrain(Brain):
         # Remember unexecuted positioning before other report errors can trigger
         # a retry that drops those actions and changes its holding claim.
         self._validate_release(original, ctx, report)
+        arm_view = report.get("arm_view")
+        if arm_view not in {"grasp", "clearance", "other", "unclear"}:
+            raise ValueError("arm_view须描述当前爪形态：grasp/clearance/other/unclear")
         names = [a["tool"] for a in actions]
         state = deepcopy(original)
         calibration = state["calibration"]
@@ -617,8 +620,11 @@ class LangGraphBrain(Brain):
             calibration["grasp"], calibration["clearance"] = ref, None
             calibration["moves"] = {"to_grasp": None, "to_clearance": None}
             state["arm_anchor"] = {"pose": "grasp", "frame": ctx.frame} if ref else None
-            if ref is not None and report.get("arm_view") != "grasp":
-                raise ValueError("保存低位当前图时arm_view须为grasp")
+            if ref is not None:
+                # The current picture defines this new candidate. This identity
+                # adds no claim about graspability or a learned return route.
+                # Keep the model's original report intact in the request trace.
+                arm_view = "grasp"
         if "clearance_reference" in report:
             ref = report["clearance_reference"]
             grasp = calibration["grasp"]
@@ -636,7 +642,7 @@ class LangGraphBrain(Brain):
                 calibration["moves"] = {"to_grasp": None, "to_clearance": None}
                 state["arm_anchor"] = None
             calibration["clearance"] = ref
-        self._observe_arm(state, ctx, report.get("arm_view"))
+        self._observe_arm(state, ctx, arm_view)
         if "grasp_region" in report:
             if ("grasp_reference" in report or "clearance_reference" in report or
                     report.get("arm_view") != "grasp" or not calibration["grasp"] or

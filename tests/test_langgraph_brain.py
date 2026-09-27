@@ -614,11 +614,14 @@ def test_release_requires_current_explicit_assessment(check, make_brain):
     assert run_ticks(brain, [], 7)[-1][0].tool == "observe" and len(requests) == 8
 
 
-@pytest.mark.parametrize("first_claim", ["held", "unclear", "empty"])
+@pytest.mark.parametrize("first_claim", ["held", "unclear", "empty", "invalid_arm_view"])
 def test_release_retry_cannot_discard_required_positioning(first_claim, make_brain):
     release = workflow()[6]
     mixed = deepcopy(release)
-    mixed["holding"] = first_claim
+    if first_claim == "invalid_arm_view":
+        mixed["arm_view"] = "made-up"
+    else:
+        mixed["holding"] = first_claim
     mixed["actions"].insert(0, action("forward", seconds=.1))
     views = [scene() for _ in range(5)] + [scene("held", "candidate") for _ in range(3)]
     brain, requests = make_brain(workflow()[:6] + [mixed, release, release], scenes=views)
@@ -712,11 +715,105 @@ def test_reset_and_lock_keep_episodes_independent(make_brain):
     assert (archive / "rounds.jsonl").exists()
 
 
+@pytest.mark.parametrize("reported_view", ["other", "unclear", "clearance"])
+def test_new_grasp_reference_defines_current_pose_without_replanning_actions(reported_view, make_brain):
+    preparation = plan(action("open_gripper"), action("shoulder", delta=.15),
+                       arm_view=reported_view, grasp_reference=GRASP)
+    brain, requests = make_brain([plan(action("arm_pose", pose="reach"), holding="unclear"), preparation])
+    history = []
+    tick(brain, history, 0)
+    batch = tick(brain, history, 20)
+    assert [{"tool": d.tool, "args": d.args} for d in batch] == preparation["actions"]
+    assert len(requests) == 2
+    state = brain.state
+    assert state["arm_anchor"] == {"pose": "grasp", "frame": state["calibration"]["grasp"]["frame"]}
+    assert state["arm_anchor"]["frame"]["history_n"] == 1
+    assert state["phase"] == "explore" and state["calibration"]["clearance"] is None
+    assert state["calibration"]["moves"] == {"to_grasp": None, "to_clearance": None}
+    row = json.loads((brain.trace_dir / "rounds.jsonl").read_text(encoding="utf-8").splitlines()[-1])
+    responses = [r for r in row["requests"] if r["kind"] == "plan"]
+    assert len(responses) == 1
+    original = json.loads(responses[0]["reply"][0]["function"]["arguments"])
+    assert original["arm_view"] == reported_view and original["actions"] == preparation["actions"]
+    assert preparation["arm_view"] == reported_view  # Do not rewrite the caller's report.
+
+
+def test_replacing_grasp_reference_clears_routes_and_does_not_complete_exploration(make_brain):
+    replace = plan(action("open_gripper"), action("shoulder", delta=.15),
+                   arm_view="other", grasp_reference=GRASP)
+    brain, requests = make_brain(workflow()[:4] + [replace, plan(phase="pick"), plan()])
+    history = []
+    run_ticks(brain, history, 4)
+    previous = brain.state["calibration"]
+    assert previous["clearance"] and all(previous["moves"].values())
+    batch = tick(brain, history, 80)
+    assert [{"tool": d.tool, "args": d.args} for d in batch] == replace["actions"]
+    replacement = brain.state
+    assert replacement["calibration"]["grasp"]["frame"] != previous["grasp"]["frame"]
+    assert replacement["calibration"]["clearance"] is None
+    assert replacement["calibration"]["moves"] == {"to_grasp": None, "to_clearance": None}
+    assert replacement["arm_anchor"] == {"pose": "grasp", "frame": replacement["calibration"]["grasp"]["frame"]}
+    tick(brain, history, 100)
+    assert len(requests) == 7 and brain.state["phase"] == "explore"
+    assert brain.state["calibration"] == replacement["calibration"]
+
+
+@pytest.mark.parametrize("reported_view", [None, "made-up"])
+def test_new_reference_does_not_hide_missing_or_invalid_arm_view(reported_view, make_brain):
+    bad = plan(action("open_gripper"), action("shoulder", delta=.15),
+               arm_view=reported_view, grasp_reference=GRASP)
+    if reported_view is None:
+        del bad["arm_view"]
+    brain, requests = make_brain([plan(action("arm_pose", pose="reach"), holding="unclear"), bad, bad])
+    history = []
+    tick(brain, history, 0)
+    before = brain.state
+    assert [d.tool for d in tick(brain, history, 20)] == ["observe"]
+    assert len(requests) == 3 and brain.state["calibration"] == before["calibration"]
+    assert brain.state["arm_anchor"] is None
+    assert [c["tool"] for c in history] == ["arm_pose", "observe"]
+    row = json.loads((brain.trace_dir / "rounds.jsonl").read_text(encoding="utf-8").splitlines()[-1])
+    errors = [r["validation_error"] for r in row["requests"] if r["kind"] == "plan"]
+    assert len(errors) == 2 and all("arm_view" in error for error in errors)
+
+
+def test_deleting_grasp_reference_does_not_infer_a_current_grasp(make_brain):
+    brain, requests = make_brain(workflow()[:4] + [plan(arm_view="other", grasp_reference=None)])
+    run_ticks(brain, [], 5)
+    assert len(requests) == 5 and brain.state["arm_anchor"] is None
+    assert brain.state["calibration"]["grasp"] is None and brain.state["calibration"]["clearance"] is None
+    assert brain.state["calibration"]["moves"] == {"to_grasp": None, "to_clearance": None}
+
+
+def test_existing_reference_does_not_turn_other_into_observed_grasp(make_brain):
+    brain, requests = make_brain(workflow()[:2] + [plan(arm_view="other")])
+    history = []
+    run_ticks(brain, history, 2)
+    anchor = brain.state["arm_anchor"]
+    tick(brain, history, 40)
+    assert len(requests) == 3 and brain.state["arm_anchor"] == anchor
+    assert brain.state["arm_anchor"]["frame"] != brain.state["last_batch"]["before"]
+    assert brain.state["calibration"]["moves"] == {"to_grasp": None, "to_clearance": None}
+
+
+def test_new_clearance_reference_still_requires_its_matching_arm_view(make_brain):
+    bad = {**workflow()[2], "arm_view": "other"}
+    brain, requests = make_brain(workflow()[:2] + [bad, workflow()[2]])
+    batches = run_ticks(brain, [], 3)
+    assert len(requests) == 4
+    assert [{"tool": d.tool, "args": d.args} for d in batches[-1]] == workflow()[2]["actions"]
+    assert brain.state["arm_anchor"]["pose"] == "clearance"
+    assert brain.state["calibration"]["moves"]["to_clearance"] is not None
+    assert brain.state["calibration"]["moves"]["to_grasp"] is None
+
+
 @pytest.mark.parametrize("invalid", [
     plan(action("shoulder", delta=.1), action("forward", seconds=0)), plan(action("shoulder", delta=float("nan"))),
     plan(action("done", success="false")), plan(action("done", success=True)), plan(action("close_gripper"), action("open_gripper")),
     plan(action("open_gripper"), action("done", success=True)), plan(target="not an object"),
     plan(grasp_reference=GRASP, holding="unclear", arm_view="grasp"), plan(grasp_reference=GRASP, arm_view="grasp", clearance_reference=CLEARANCE),
+    plan(grasp_reference=GRASP, holding="unclear", arm_view="other"),
+    plan(grasp_reference=GRASP, holding="held", arm_view="other"),
     plan(grasp_reference={"region": [.5, .5, .4, .8], "note": "反框"}, arm_view="grasp"),
     plan(phase="pick", grasp_reference=GRASP, arm_view="grasp"), plan(phase="place", holding="unclear"), plan(arm_view="made-up")])
 def test_bad_plan_is_atomic_and_fallback_does_not_end_episode(invalid, make_brain):
@@ -742,8 +839,9 @@ def test_same_direction_return_is_rejected(make_brain):
     assert len(requests) == 5 and brain.state["calibration"]["moves"]["to_grasp"] is None
 
 
-def test_closed_gripper_cannot_save_open_geometry(make_brain):
-    brain, requests = make_brain(workflow()[:5] + [plan(action("open_gripper"), grasp_reference=GRASP, arm_view="grasp"),
+@pytest.mark.parametrize("reported_view", ["grasp", "other"])
+def test_closed_gripper_cannot_save_open_geometry(reported_view, make_brain):
+    brain, requests = make_brain(workflow()[:5] + [plan(action("open_gripper"), grasp_reference=GRASP, arm_view=reported_view),
                                                 plan(action("shoulder", delta=.1), phase="pick", holding="unclear")])
     history = []; run_ticks(brain, history, 5); saved = deepcopy(brain.state["calibration"]["grasp"])
     assert tick(brain, history, 120)[0].tool == "shoulder" and len(requests) == 7
