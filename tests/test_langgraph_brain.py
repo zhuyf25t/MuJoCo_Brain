@@ -965,7 +965,7 @@ def test_calibration_probe_only_projects_geometry_and_preserves_base_cache(probe
     assert brain.state["visual_memory"]["held"] is None
 
 
-def test_initial_shoulder_comparison_uses_adjacent_images_without_predictions(make_brain):
+def test_initial_shoulder_comparison_keeps_reference_and_adjacent_images_separate(make_brain):
     base = {**scene("unclear", "blocked"), "gripper": "BASE_GEOMETRY"}
     probe = {**scene("unclear", "candidate"), "gripper": "CURRENT_GEOMETRY_AND_DIRECT_CHANGE",
              "ground_balls": [{"center": [.9, .9], "description": "WRONG_PROBE_BALL"}]}
@@ -982,7 +982,7 @@ def test_initial_shoulder_comparison_uses_adjacent_images_without_predictions(ma
     assert pair["messages"][0]["content"] == CALIBRATION_COMPARE_PROMPT
     images = [p for p in pair["messages"][1]["content"] if p["type"] == "image_url"]
     # The previous batch began at 40; the saved grasp reference is the older 20.
-    assert images == [encode_image_block(obs(v)["images"]["front"], fmt="openai") for v in (40, 60)]
+    assert images == [encode_image_block(obs(v)["images"]["front"], fmt="openai") for v in (20, 40, 60)]
     payload = json.dumps(pair)
     for private in ("OLD_COMPARISON_PRIVATE", "EXPECTED_CHANGE_PRIVATE", "PRIVATE_HOLDING", "PRIVATE_RESULT", "TASK"):
         assert private not in payload
@@ -998,6 +998,12 @@ def test_initial_shoulder_comparison_uses_adjacent_images_without_predictions(ma
     for view, value in zip(requests.observations, (0, 20, 40, 60)):
         assert [p for p in view["messages"][1]["content"] if p["type"] == "image_url"] == [
             encode_image_block(obs(value)["images"]["front"], fmt="openai")]
+    row = json.loads((brain.trace_dir / "rounds.jsonl").read_text(encoding="utf-8").splitlines()[-1])
+    archived = next(r for r in row["requests"] if r["kind"] == "calibration_gripper")
+    frames = [row["state_before"]["calibration"]["grasp"]["frame"],
+              row["state_before"]["last_batch"]["before"], row["current_frame"]]
+    assert [p["image_url"]["url"] for p in archived["messages"][1]["content"] if p["type"] == "image_url"] == [
+        "images/" + frame["image_id"] + ".jpg" for frame in frames]
 
 
 def test_initial_comparison_cache_distinguishes_before_image_and_single_view(make_brain):
@@ -1009,10 +1015,66 @@ def test_initial_comparison_cache_distinguishes_before_image_and_single_view(mak
     assert len(requests.observations) == 3  # Base still caches only current pixels.
     probes = requests.gripper_observations
     assert len(probes) == 3  # Single 20, pair 20->40, pair 40->40; final pair is reused.
-    for probe, values in zip(probes, ((20,), (20, 40), (40, 40))):
+    for probe, values in zip(probes, ((20,), (20, 40), (40,))):
         assert [p for p in probe["messages"][1]["content"] if p["type"] == "image_url"] == [
             encode_image_block(obs(v)["images"]["front"], fmt="openai") for v in values]
+    shared_label = probes[-1]["messages"][1]["content"][-2]["text"]
+    assert shared_label.startswith("唯一当前图") and "上批动作前图" in shared_label
     assert brain.state["calibration"]["moves"] == {"to_grasp": None, "to_clearance": None}
+
+
+def test_shape_reference_appears_after_save_and_invalidates_cache_when_pixels_change(make_brain):
+    ref = {**GRASP, "note": "REFERENCE_NOTE_PRIVATE"}
+    save = plan(arm_view="grasp", grasp_reference=ref)
+    brain, requests = make_brain([plan(action("open_gripper")), save, save, save, plan()])
+    history = []
+    for value in (0, 20, 40, 40, 40):
+        tick(brain, history, value)
+    probes = requests.gripper_observations
+    assert len(requests.observations) == 3 and len(probes) == 3
+    # The first observation cannot read a reference the planner has not saved yet.
+    # Replacing that reference with current pixels changes the probe's scope;
+    # refreshing the same pixels at a later history index does not change it.
+    for probe, values in zip(probes, ((20,), (20, 40), (40,))):
+        assert [p for p in probe["messages"][1]["content"] if p["type"] == "image_url"] == [
+            encode_image_block(obs(v)["images"]["front"], fmt="openai") for v in values]
+        assert "REFERENCE_NOTE_PRIVATE" not in json.dumps(probe)
+        assert "region" not in json.dumps(probe["messages"][1])
+    merged_label = probes[-1]["messages"][1]["content"][-2]["text"]
+    assert merged_label.startswith("唯一当前图") and "历史候选爪形参考" in merged_label
+    rows = [json.loads(s) for s in (brain.trace_dir / "rounds.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert rows[-2]["state_after"]["calibration"]["grasp"]["frame"]["history_n"] == 3
+    assert rows[-1]["current_frame"]["history_n"] == 4
+    assert rows[-1]["scene_reused"] and not any(r["kind"] == "calibration_gripper" for r in rows[-1]["requests"])
+
+
+@pytest.mark.parametrize("values,expected", [
+    ((20, 20, 40), (20, 40)),
+    ((20, 40, 20), (40, 20)),
+    ((20, 40, 40), (20, 40)),
+    ((20, 20, 20), (20,)),
+])
+def test_shape_probe_merges_pixel_duplicates_without_losing_roles(values, expected, make_brain):
+    brain, requests = make_brain([plan(action("open_gripper"))])
+    tick(brain, [], 0)
+    frames = [brain.memory.save_image(obs(value)["images"]["front"], n)
+              for n, value in enumerate(values, 1)]
+    ctx = SimpleNamespace(frame=frames[-1], requests=[])
+    brain._describe_current(ctx, CALIBRATION_COMPARE_PROMPT, "calibration_gripper",
+                            reference=frames[0], before=frames[1])
+    content = requests.gripper_observations[-1]["messages"][1]["content"]
+    blocks = [p for p in content if p["type"] == "image_url"]
+    assert blocks == [encode_image_block(obs(v)["images"]["front"], fmt="openai") for v in expected]
+    for role, value in zip(("历史候选爪形参考", "上批动作前图", "唯一当前图"), values):
+        image = encode_image_block(obs(value)["images"]["front"], fmt="openai")
+        index = content.index(image)
+        assert role in content[index - 1]["text"]
+    assert content[-2]["text"].startswith("唯一当前图")
+    assert content[-1] == encode_image_block(obs(values[-1])["images"]["front"], fmt="openai")
+    ids = {value: frame["image_id"] for value, frame in zip(values, frames)}
+    archived = ctx.requests[0]["messages"][1]["content"]
+    assert [p["image_url"]["url"] for p in archived if p["type"] == "image_url"] == [
+        "images/" + ids[value] + ".jpg" for value in expected]
 
 
 @pytest.mark.parametrize("actions", [
@@ -1041,12 +1103,13 @@ def test_same_pixels_entering_pick_keep_probe_with_scope_specific_cache(make_bra
         tick(brain, history, value)
     assert len(requests.observations) == 4
     assert len(requests.gripper_observations) == 4
-    # The explore round compared 40->60. Entering pick after a mixed batch
-    # needs current-only 60; the following identical current-only view is reused.
+    # The explore round compared 40->60, with the grasp image as another role.
+    # A mixed batch removes the temporal pair, but keeps the grasp reference.
+    # The next identical reference/current scope is reused.
     pair, single = requests.gripper_observations[-2:]
     assert pair["messages"][0]["content"] == CALIBRATION_COMPARE_PROMPT
     assert single["messages"][0]["content"] == CALIBRATION_VIEW_PROMPT
-    for request, values in ((pair, (40, 60)), (single, (60,))):
+    for request, values in ((pair, (20, 40, 60)), (single, (20, 60))):
         assert [p for p in request["messages"][1]["content"] if p["type"] == "image_url"] == [
             encode_image_block(obs(v)["images"]["front"], fmt="openai") for v in values]
     expected = {**described_scene(), "gripper": probe["gripper"]}
@@ -1059,7 +1122,7 @@ def test_same_pixels_entering_pick_keep_probe_with_scope_specific_cache(make_bra
 
 
 @pytest.mark.parametrize("probe_holding", ["empty", "unclear"])
-def test_pregrasp_pick_probe_is_current_only_and_cannot_replace_base_fields(probe_holding, make_brain):
+def test_pregrasp_pick_probe_uses_reference_but_cannot_replace_base_fields(probe_holding, make_brain):
     base = {**scene("unclear", "blocked"), "gripper": "BASE_SHADOW_IDENTITY", "evidence": "BASE_SHADOW_EVIDENCE"}
     probe = {**scene(probe_holding, "candidate"), "gripper": "REAL_JAWS_OUT_OF_FRAME_GROUND_SHADOW_ONLY",
              "ground_balls": [{"center": [.9, .9], "description": "WRONG_PROBE_BALL"}], "evidence": "WRONG_PROBE_RELEASE"}
@@ -1073,7 +1136,7 @@ def test_pregrasp_pick_probe_is_current_only_and_cannot_replace_base_fields(prob
     request = requests.gripper_observations[-1]
     assert request["messages"][0]["content"] == CALIBRATION_VIEW_PROMPT
     assert [p for p in request["messages"][1]["content"] if p["type"] == "image_url"] == [
-        encode_image_block(obs(80)["images"]["front"], fmt="openai")]
+        encode_image_block(obs(v)["images"]["front"], fmt="openai") for v in (20, 80)]
     for private in ("PRIVATE_HOLDING", "PRIVATE_RESULT", "TASK"):
         assert private not in json.dumps(request)
     projected = planner_scene(requests[-1])
@@ -1128,6 +1191,8 @@ def test_failed_or_held_pick_probe_keeps_base_usable_and_caches_fallback(probe, 
     run_ticks(brain, history, 4)
     assert [d.tool for d in tick(brain, history, 80)] == ["forward"]
     assert [d.tool for d in tick(brain, history, 80)] == ["observe"]
+    assert [p for p in requests.gripper_observations[-1]["messages"][1]["content"] if p["type"] == "image_url"] == [
+        encode_image_block(obs(v)["images"]["front"], fmt="openai") for v in (20, 80)]
     expected = {**base, "ground_balls": [{"description": "上方地面的球"}]}
     assert all(planner_scene(request) == expected for request in requests[-2:])
     assert len(requests) == 6 and len(requests.observations) == 5 and len(requests.gripper_observations) == 4

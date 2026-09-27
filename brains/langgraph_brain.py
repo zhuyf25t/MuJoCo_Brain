@@ -284,6 +284,7 @@ class LangGraphBrain(Brain):
             scene.pop("evidence")
             geometry_note = (
                 "本轮首次抓取前的gripper由另一次结合本车外观说明的看图复核提供，帮助辨认实体掌/夹块的位置、形态和遮挡。"
+                "若附有历史候选爪形参考，只用于辨认实体及比较姿态，不是已经抓成功的证明；只有同时标记为上批动作前图时，才也用于比较这一批的变化。"
                 "其中若有‘与前图比较’，是直接对照上批动作前和现在的实图，不读取动作预期或旧结论；把可见变化与实际指令对应，不把两次粗估坐标的差当成运动。"
                 "球的描述、holding、release_view仍来自原独立观测，未被复核替换；夹爪描述中提到的空爪或持球不能覆盖这些字段。"
                 "保存姿态仍须核对当前实体与地面，形态复核不是已经到达低位或就绪位的证明。")
@@ -378,17 +379,21 @@ class LangGraphBrain(Brain):
         deltas = [a["args"]["delta"] for a in actions if a["tool"] == "shoulder"]
         before = None
         # _consume_batch already matched this complete batch against command history.
-        # Compare the adjacent images, not a pose reference or a predicted result.
+        # Only the adjacent pair describes this batch's change. The older grasp
+        # image separately supplies a candidate appearance/pose reference.
         if (deltas and all(a["tool"] in {"shoulder", "observe"} for a in actions) and
                 (all(d > 0 for d in deltas) or all(d < 0 for d in deltas))):
             before = previous["before"]
-        cache_key = (before["image_id"] if before else None, ctx.frame["image_id"])
+        grasp = state["calibration"]["grasp"]
+        reference = grasp["frame"] if grasp else None
+        cache_key = (reference["image_id"] if reference else None,
+                     before["image_id"] if before else None, ctx.frame["image_id"])
         if self._gripper_cache and self._gripper_cache[0] == cache_key:
             ctx.calibration_gripper = self._gripper_cache[1]
             return
         try:
             prompt = CALIBRATION_COMPARE_PROMPT if before else CALIBRATION_VIEW_PROMPT
-            report = self._describe_current(ctx, prompt, "calibration_gripper", before=before)
+            report = self._describe_current(ctx, prompt, "calibration_gripper", before=before, reference=reference)
         except (ValueError, TypeError, KeyError, httpx.HTTPError):
             self._gripper_cache = (cache_key, None)
             return  # An optional shape reading cannot invalidate a valid base scene.
@@ -399,18 +404,36 @@ class LangGraphBrain(Brain):
         ctx.calibration_gripper = report["gripper"] if report["holding"] in {"empty", "unclear"} else None
         self._gripper_cache = (cache_key, ctx.calibration_gripper)
 
-    def _describe_current(self, ctx, prompt, kind, *, before=None):
+    def _describe_current(self, ctx, prompt, kind, *, before=None, reference=None):
         images = [["唯一当前图", ctx.frame]]
         content = [{"type": "text", "text": "只描述这一张当前图，调用describe_scene。"}]
-        if before is not None:
-            images.insert(0, ["上批动作前图", before])
-            content = [{"type": "text", "text": "第一张：上批动作之前的实图。"}, self.memory.image_block(before),
-                       {"type": "text", "text": "第二张：唯一当前实图。调用describe_scene；gripper附上与第一张实体夹爪的直接比较。"}]
-        content.append(self.memory.image_block(ctx.frame))
+        if before is not None or reference is not None:
+            candidates = []
+            if reference is not None:
+                candidates.append(["历史候选爪形参考（不是当前图，也不保证姿态可抓球）", reference])
+            if before is not None:
+                candidates.append(["上批动作前图（只与当前图比较这一批的可见变化）", before])
+            candidates.extend(images)
+            images = []
+            for label, frame in candidates:
+                found = next((entry for entry in images if entry[1]["image_id"] == frame["image_id"]), None)
+                if found:
+                    if label == "唯一当前图":
+                        images.remove(found)
+                        images.append([f"唯一当前图；也与{found[0]}像素相同", frame])
+                    else:
+                        found[0] += "；也对应" + label
+                else:
+                    images.append([label, frame])
+            content = [{"type": "text", "text": "按每张图片的角色标签阅读。最后一张是唯一当前图；历史图只用于明确的对照。调用describe_scene。"}]
+            for label, frame in images:
+                content.extend([{"type": "text", "text": label}, self.memory.image_block(frame)])
+        else:
+            content.append(self.memory.image_block(ctx.frame))
         messages = [{"role": "system", "content": prompt}, {"role": "user", "content": content}]
         tool = scene_tool()
-        if before is not None:
-            tool["function"]["description"] = "根据第二张当前图片报告物体和空间关系；gripper还需与第一张的同一实体夹爪直接比较，不作动作规划。"
+        if before is not None or reference is not None:
+            tool["function"]["description"] = "只根据唯一当前图报告物体和空间关系；gripper仅与本次实际提供并标记的历史图按各自角色比较，不作动作规划。"
         request = {"kind": kind, "messages": self.memory.archive_messages(messages, images), "tools": [tool]}
         ctx.requests.append(request)
         started = time.monotonic()
