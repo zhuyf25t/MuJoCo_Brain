@@ -192,13 +192,13 @@ arm_view每轮描述当前相对照片的爪形态：grasp=回到低位形态，
 
 一次修正怎样交给下一轮：
 last_batch保存上一批为什么这样做(reason)、实际指令(actions)、希望下一图出现什么(expected)，以及当时对更早一批的review。本轮要评价的是上批执行后现在实际变成了什么，不能把旧review当成本轮已经评价过。
-从进入pick开始，每轮都用review回应上批；只要correction还存在，即使暂回explore或进入place，也仍要回应。review.evidence说当前图与上批预期哪里相符、哪里不符；hypothesis说最可能的原因及尚未确定处，可以坦白说不知道。不是每轮都必须失败：正常接近、有进展但还没到目标时，result用progress。
+只要有已执行的上批，本轮开始的阶段或你报告的新阶段属于捡球、投放，就用review回应，包括运球接近箱子、张爪后检查球去了哪里；没有correction也要评价，从投放切回explore也要先评价刚执行的动作。只要correction还存在，每轮也都要回应。review.evidence说当前图与上批预期哪里相符、哪里不符；hypothesis说最可能的原因及尚未确定处，可以坦白说不知道。不是每轮都必须失败：正常接近、有进展但还没到目标时，result用progress。
 发现抓空、走过、走偏或结果无法确认时，用unchanged（未改善）、worse（偏差更大）或unclear（看不清结果）。没有correction时，系统把这次偏差和实际前后图保存为一个待解决问题；已有问题时，保留最初事实，只更新原因假设。后续的progress、unchanged、worse、unclear都不会把它抹掉。问题存在时，评价要针对原problem：抬肩找回球可以完成观察这一步，但球仍未对好，就没有解决原问题。
 只有当前图已经支持原问题得到解决，review.result才用resolved，并在evidence说清依据。准备去修、刚发出修正动作、换了阶段、重新看见绿色，都不是结清依据。若改换目标使原问题不再适用，也要明确说明现在为何可以结束旧问题，不能悄悄丢掉。resolved只管理这份记忆，不代表已经持球、可以释放或任务成功。
 reason说明接下来准备针对什么偏差、为何选这些方向和幅度，expected说明下一张图怎样检验；它们和actions会原样交给下一轮。这样下一轮要接着检查这次方案，不是从“又看到球了”重新开始。原因改变时可以推翻旧假设，但不能把尚未执行的解决方案写成已经发生的事实。
 
 前进、后退的时长怎样积累经验：
-捡球或仍有correction时，上一批实际包含forward/back，就必须在motion_effect里比较该批前后图。target_match=same表示能对应同一目标，effect说明实际变近/变远、左右偏差、过头或仍差多少，以及哪里看不清；无法对应就写unclear，明确换了目标写different，不必强行估出位移。系统仅在same时保留这组motion_example，前后图、完整实际动作与执行阶段由程序绑定，中间几轮抬肩或观察不会把它冲掉。样本只在相同阶段作为参照提供，捡球样本不会被当作投箱距离经验。不是刚准备前进，就可以先记录一个预测的运动效果。
+上述需要review的情况下，上一批实际包含forward/back，就必须在motion_effect里比较该批前后图。target_match=same表示能对应同一目标，effect说明实际变近/变远、左右偏差、过头或仍差多少，以及哪里看不清；无法对应就写unclear，明确换了目标写different，不必强行估出位移。系统仅在same时保留这组motion_example，前后图、完整实际动作与执行阶段由程序绑定，中间几轮抬肩或观察不会把它冲掉。样本只在相同阶段作为参照提供，捡球样本不会被当作投箱距离经验。不是刚准备前进，就可以先记录一个预测的运动效果。
 motion_example是最近一次局部试验，correction还保留最初发生偏差的那次试验；比较时可看两组实图和各自真实时长。它们不是固定速度表：越接近球，等时长带来的画面变化越大；目标换了、转过车、球滚过或被挡住时，原来的估量可能不再适用。一个批次里若先转向再前进又降肩，只能说明整批的结果，不能假装分别看过中间每一步，也不能把全部变化归给前进。
 （一种可行方式：上次前进1.5秒过头，后来后退0.6秒让同一颗球从极近退到仍略近，就把这两次实际效果作为幅度参照；这次只检验剩下的一小段距离，可选择更短的后退，并在reason解释这个选择。执行后再看是否真的缩小了近侧偏差、是否过退，再决定下一段。这里的数字是说明推理方法，不是本任务固定时长；不把两次粗估坐标相减后除以秒数当成可靠速度，也不编造米数（仅供参考））
 
@@ -232,14 +232,14 @@ def plan_tool(tool_names):
                 "reason": text, "expected": text,
                 "learning": {**text, "description": "本轮新观察的经验或不确定处；稳定肩动作由系统单独保留"},
                 "review": {"type": "object", "additionalProperties": False,
-                    "description": "进入捡球后的每轮或已有correction时必填。评价已执行上批及尚未解决的原问题，不是本批预测。",
+                    "description": "有已执行上批，且入口或报告阶段为捡球/投放、或已有correction时必填。评价上批及尚未解决的原问题，不是本批预测。",
                     "required": ["result", "evidence", "hypothesis"], "properties": {
                         "result": {"type": "string", "enum": ["progress", "unchanged", "worse", "unclear", "resolved"],
                             "description": "有进展/未改善/变差/未知均保留旧问题；resolved仅在当前证据已解决现有correction时结清"},
                         "evidence": {**text, "description": "当前图与上批目的、预期的实际差别；有correction时说明原问题还有什么未解决"},
                         "hypothesis": {**text, "description": "根据实际结果更新的原因假设与未知处；没有新偏差可以说明进展正常，不编造原因"}}},
                 "motion_effect": {"type": "object", "additionalProperties": False,
-                    "description": "捡球或存在correction时，上批实际含forward/back则必填；目标未知可如实说明。照片、完整已执行动作及执行阶段由程序绑定，本批预测不算经验。",
+                    "description": "需要review且上批实际含forward/back时必填；目标未知可如实说明。照片、完整已执行动作及执行阶段由程序绑定，本批预测不算经验。",
                     "required": ["target_match", "effect"], "properties": {
                         "target_match": {"type": "string", "enum": ["same", "different", "unclear"]},
                         "effect": {**text, "description": "同一目标的可见变化、实际偏差及适用限制；组合动作只说明整批作用，不编造固定速度或实测距离"}}},

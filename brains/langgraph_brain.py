@@ -501,7 +501,8 @@ class LangGraphBrain(Brain):
         """Retain observed problems; visual conclusions still belong to the model."""
         previous = original["last_batch"]
         active = original.get("correction")
-        required = previous is not None and (active is not None or original["phase"] == "pick" or report["phase"] == "pick")
+        required = previous is not None and (
+            active is not None or original["phase"] in {"pick", "place"} or report["phase"] in {"pick", "place"})
         review = report.get("review")
         if review is None:
             if required:

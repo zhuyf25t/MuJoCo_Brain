@@ -117,7 +117,8 @@ def make_brain(monkeypatch, tmp_path):
                 # Missing-field tests opt out of this compatibility helper.
                 prior = input_text(body)["状态"]
                 previous = prior["last_batch"]
-                required = prior["phase"] == "pick" or result.get("phase") == "pick" or prior.get("correction")
+                required = (prior["phase"] in {"pick", "place"} or
+                            result.get("phase") in {"pick", "place"} or prior.get("correction"))
                 if (legacy_motion_review and required and previous and "motion_effect" not in result and
                         any(a["tool"] in {"forward", "back"} for a in previous["actions"])):
                     result["motion_effect"] = {"target_match": "unclear", "effect": "旧测试未模拟同一目标的运动效果"}
@@ -367,6 +368,93 @@ def test_missing_motion_effect_after_executed_pick_motion_is_atomic(make_brain):
         assert brain.state[key] == before[key]
     assert len(requests) == 7
     assert input_text(requests[-2])["状态"] == input_text(requests[-1])["状态"]
+
+
+@pytest.mark.parametrize("after_release,next_phase", [(False, "place"), (True, "place"), (True, "explore")])
+def test_place_without_correction_requires_review_but_allows_reviewed_recovery(after_release, next_phase, make_brain):
+    prefix = workflow()[:7 if after_release else 6]
+    # These setup replies explicitly leave target identity unknown. Disable the
+    # legacy helper so it cannot repair the missing field under test.
+    for index in range(1, len(prefix)):
+        if any(a["tool"] in {"forward", "back"} for a in prefix[index - 1]["actions"]):
+            prefix[index]["motion_effect"] = {"target_match": "unclear", "effect": "前置批次未核实同一目标的变化"}
+    recovery = plan(action("shoulder", delta=-.05), phase=next_phase, holding="unclear",
+                    review=review("unchanged", "当前图尚未看清球与夹指或箱沿的支撑关系", "先改变观察姿态检查支撑"))
+    if not after_release:
+        recovery["motion_effect"] = {"target_match": "unclear", "effect": "接近后的箱口与球关系仍不能对应"}
+    missing = deepcopy(recovery)
+    del missing["review"]
+    brain, requests = make_brain(prefix + [missing, recovery], legacy_motion_review=False)
+    history = []
+    run_ticks(brain, history, len(prefix))
+    before = brain.state
+    assert before["phase"] == "place" and before["correction"] is None
+    assert [c["tool"] for c in history if c["tool"] in {"open_gripper", "close_gripper"}][-1] == (
+        "open_gripper" if after_release else "close_gripper")
+    history_before = deepcopy(history)
+    batch = tick(brain, history, len(prefix) * 20)
+    assert [action(d.tool, **d.args) for d in batch] == recovery["actions"]
+    assert history[:len(history_before)] == history_before
+    assert len(requests) == len(prefix) + 2
+    assert input_text(requests[-2])["状态"] == input_text(requests[-1])["状态"]
+    assert brain.state["phase"] == next_phase
+    assert brain.state["visual_memory"]["held"] == before["visual_memory"]["held"]
+    assert brain.state["last_batch"]["review"] == recovery["review"]
+    assert brain.state["correction"] == {
+        "problem": recovery["review"]["evidence"], "hypothesis": recovery["review"]["hypothesis"],
+        "before": before["last_batch"]["before"], "after": brain.state["last_batch"]["before"],
+    }
+    trace = json.loads((brain.trace_dir / "rounds.jsonl").read_text(encoding="utf-8").splitlines()[-1])
+    errors = [r["validation_error"] for r in trace["requests"] if "validation_error" in r]
+    assert len(errors) == 1 and "review" in errors[0]
+    assert trace["current_scene"]["holding"] == "unclear"
+
+
+@pytest.mark.parametrize("movement", ["forward", "back"])
+def test_place_motion_feedback_retries_and_binds_complete_executed_batch(movement, make_brain):
+    prefix = workflow()[:6]
+    for index in range(1, len(prefix)):
+        if any(a["tool"] in {"forward", "back"} for a in prefix[index - 1]["actions"]):
+            prefix[index]["motion_effect"] = {"target_match": "unclear", "effect": "前置批次未核实同一目标的变化"}
+    executed = plan(action("turn_left", seconds=.1), action(movement, seconds=.2),
+                    action("shoulder", delta=-.05), phase="place", holding="held",
+                    motion_effect={"target_match": "unclear", "effect": "此前接近的目标对应仍待核实"})
+    recorded = plan(action("shoulder", delta=.05), phase="place", holding="held",
+                    motion_effect={"target_match": "same", "effect": "整批转向、平移和肩动作后，同一箱口与球的关系改变"})
+    missing = deepcopy(recorded)
+    del missing["motion_effect"]
+    brain, requests = make_brain(prefix + [executed, missing, recorded, plan(phase="place", holding="held")],
+                                legacy_motion_review=False)
+    history = []
+    run_ticks(brain, history, len(prefix) + 1)
+    before = brain.state
+    assert before["phase"] == "place" and before["correction"] is None
+    assert before["last_batch"]["actions"] == executed["actions"]
+    for entry in history:
+        entry.update(ok=False, result="PRIVATE_PLACE_DISTANCE", thought="PRIVATE_PLACE_CONTACT")
+    batch = tick(brain, history, 140)
+    assert [action(d.tool, **d.args) for d in batch] == recorded["actions"]
+    assert len(requests) == len(prefix) + 3
+    assert input_text(requests[-2])["状态"] == input_text(requests[-1])["状态"]
+    example = brain.state["motion_example"]
+    assert example == {"phase": "place", "before": before["last_batch"]["before"],
+                       "after": brain.state["last_batch"]["before"], "effect": recorded["motion_effect"]["effect"]}
+    assert example["after"]["history_n"] - example["before"]["history_n"] == len(executed["actions"])
+    assert brain.state["correction"] is None
+    trace = json.loads((brain.trace_dir / "rounds.jsonl").read_text(encoding="utf-8").splitlines()[-1])
+    errors = [r["validation_error"] for r in trace["requests"] if "validation_error" in r]
+    assert len(errors) == 1 and "motion_effect" in errors[0]
+    tick(brain, history, 160)
+    body = input_text(requests[-1])
+    assert body["状态"]["motion_example"] == example
+    assert body["两组历史前后图之间实际执行的完整动作"]["motion_example"] == executed["actions"]
+    assert brain.state["motion_example"] == example
+    parts = requests[-1]["messages"][1]["content"]
+    for value in (120, 140):
+        assert encode_image_block(obs(value)["images"]["front"], fmt="openai") in parts
+    assert parts[-2] == encode_image_block(obs(160)["images"]["front"], fmt="openai")
+    assert "PRIVATE_PLACE_DISTANCE" not in json.dumps(requests)
+    assert "PRIVATE_PLACE_CONTACT" not in json.dumps(brain.state)
 
 
 def test_pick_motion_example_is_hidden_in_place_and_available_again_in_pick(make_brain):
