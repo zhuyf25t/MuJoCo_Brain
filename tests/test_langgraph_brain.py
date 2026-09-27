@@ -572,6 +572,30 @@ def planner_scene(request):
     return json.loads(request["messages"][1]["content"][-1]["text"].split("：", 1)[1].split("\n", 1)[0])
 
 
+def described_scene(holding="empty", release_view="unclear"):
+    return {**scene(holding, release_view), "ground_balls": [{"description": "上方地面的球"}]}
+
+
+@pytest.mark.parametrize("holding,release_view", [("empty", "unclear"), ("held", "blocked")])
+def test_observer_coordinate_outlier_cannot_change_planner_input(holding, release_view, make_brain):
+    requests_by_center = []
+    for center in ([.46, .38], [.46, .70]):
+        observed = scene(holding, release_view)
+        observed["ground_balls"][0]["center"] = center
+        brain, requests = make_brain(
+            [plan(phase="place" if holding == "held" else "explore", holding=holding)], scenes=[observed])
+        tick(brain, [], 20)
+        requests_by_center.append(requests[0])
+        assert planner_scene(requests[0]) == described_scene(holding, release_view)
+        assert brain._scene_cache[1] == observed
+        row = json.loads((brain.trace_dir / "rounds.jsonl").read_text(encoding="utf-8").splitlines()[-1])
+        assert row["current_scene"] == observed
+        assert brain.state["calibration"]["grasp"] is None
+    # A large change in the observer's guessed center cannot become new evidence
+    # of ball motion for the planner. The raw estimates remain available to audit.
+    assert requests_by_center[0] == requests_by_center[1]
+
+
 @pytest.mark.parametrize("probe_holding", ["empty", "unclear"])
 def test_calibration_probe_only_projects_geometry_and_preserves_base_cache(probe_holding, make_brain):
     base = {**scene("unclear", "blocked"), "gripper": "BASE_SHADOW_IDENTITY", "evidence": "BASE_SHADOW_EVIDENCE"}
@@ -587,7 +611,8 @@ def test_calibration_probe_only_projects_geometry_and_preserves_base_cache(probe
         projected = planner_scene(request)
         assert projected["gripper"] == probe["gripper"]
         assert "evidence" not in projected
-        for field in ("ground_balls", "holding", "release_view"):
+        assert projected["ground_balls"] == [{"description": "上方地面的球"}]
+        for field in ("holding", "release_view"):
             assert projected[field] == base[field]
     assert brain._scene_cache[1] == base
     rows = [json.loads(s) for s in (brain.trace_dir / "rounds.jsonl").read_text(encoding="utf-8").splitlines()]
@@ -621,7 +646,8 @@ def test_initial_shoulder_comparison_uses_adjacent_images_without_predictions(ma
     assert len(requests.gripper_observations) == 3  # Replaces the probe, adds no request.
     projected = planner_scene(requests[-1])
     assert projected["gripper"] == probe["gripper"]
-    for field in ("ground_balls", "holding", "release_view"):
+    assert projected["ground_balls"] == [{"description": "上方地面的球"}]
+    for field in ("holding", "release_view"):
         assert projected[field] == base[field]
     assert brain._scene_cache[1] == base and brain.state["visual_memory"]["held"] is None
     for view, value in zip(requests.observations, (0, 20, 40, 60)):
@@ -668,7 +694,7 @@ def test_same_pixels_entering_pick_use_unmodified_base_without_new_observation(m
         tick(brain, history, value)
     assert len(requests.observations) == 4
     assert len(requests.gripper_observations) == 3
-    assert planner_scene(requests[-1]) == scene()
+    assert planner_scene(requests[-1]) == described_scene()
     rows = [json.loads(s) for s in (brain.trace_dir / "rounds.jsonl").read_text(encoding="utf-8").splitlines()]
     assert rows[-1]["scene_reused"] and rows[-1]["calibration_gripper"] is None
 
@@ -679,7 +705,7 @@ def test_close_then_open_in_explore_does_not_reenable_initial_geometry_probe(mak
     run_ticks(brain, [], 4)
     assert len(requests.gripper_observations) == 1
     assert brain.state["phase"] == "explore"
-    assert planner_scene(requests[-1]) == scene()
+    assert planner_scene(requests[-1]) == described_scene()
 
 
 @pytest.mark.parametrize("probe", [{}, scene("held")])
@@ -688,7 +714,7 @@ def test_unaccepted_geometry_probe_leaves_valid_base_scene_usable(probe, make_br
                                 gripper_scenes=[probe])
     batches = run_ticks(brain, [], 2)
     assert batches[-1][0].tool == "shoulder"
-    assert planner_scene(requests[-1]) == scene()
+    assert planner_scene(requests[-1]) == described_scene()
 
 
 def test_direct_held_evidence_skips_initial_geometry_probe(make_brain):
@@ -696,7 +722,7 @@ def test_direct_held_evidence_skips_initial_geometry_probe(make_brain):
                                 scenes=[scene(), scene("held", "blocked")])
     run_ticks(brain, [], 2)
     assert not requests.gripper_observations
-    assert planner_scene(requests[-1]) == scene("held", "blocked")
+    assert planner_scene(requests[-1]) == described_scene("held", "blocked")
 
 
 def test_optional_geometry_timeout_preserves_valid_observation_and_planning(make_brain):
@@ -707,7 +733,7 @@ def test_optional_geometry_timeout_preserves_valid_observation_and_planning(make
     for value in (0, 20, 20, 20):
         tick(brain, history, value)
     assert len(requests) == 4 and len(requests.gripper_observations) == 2
-    assert all(planner_scene(request) == scene() for request in requests[1:])
+    assert all(planner_scene(request) == described_scene() for request in requests[1:])
     rows = [json.loads(s) for s in (brain.trace_dir / "rounds.jsonl").read_text(encoding="utf-8").splitlines()]
     for row in rows[1:3]:
         assert next(r for r in row["requests"] if r["kind"] == "calibration_gripper")["error"] == "ReadTimeout"

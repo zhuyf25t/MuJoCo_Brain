@@ -244,6 +244,10 @@ class LangGraphBrain(Brain):
             content.extend([{"type": "text", "text": f"{label}；已调用动作数={frame['history_n']}"},
                             self.memory.image_block(frame)])
         scene = deepcopy(ctx.scene)
+        # Observer coordinates are another model's guesses, not measurements.
+        # Keep them in the raw observation/trace, not as numbers to copy into a
+        # persistent grasp region or subtract to invent motion after a miss.
+        scene["ground_balls"] = [{"description": ball["description"]} for ball in scene["ground_balls"]]
         geometry_note = ""
         if ctx.calibration_gripper:
             scene["gripper"] = ctx.calibration_gripper
@@ -253,14 +257,15 @@ class LangGraphBrain(Brain):
             geometry_note = (
                 "本轮初始标定的gripper由另一次结合本车外观说明的看图复核提供，帮助辨认实体掌/夹块的位置、形态和遮挡。"
                 "其中若有‘与前图比较’，是直接对照上批动作前和现在的实图，不读取动作预期或旧结论；把可见变化与实际指令对应，不把两次粗估坐标的差当成运动。"
-                "球坐标、holding、release_view仍来自原独立观测，未被复核替换；夹爪描述中提到的空爪或持球不能覆盖这些字段。"
+                "球的描述、holding、release_view仍来自原独立观测，未被复核替换；夹爪描述中提到的空爪或持球不能覆盖这些字段。"
                 "保存姿态仍须核对当前实体与地面，形态复核不是已经到达低位或就绪位的证明。")
         scene_scope = ("当前图观测；初始gripper复核的来源与比较范围见下文" if ctx.calibration_gripper else
                        "独立只看最后这张当前图得到；不是历史或动作预测")
         content.append({"type": "text", "text": f"current_scene（{scene_scope}）：" +
                         json.dumps(scene, ensure_ascii=False) +
                         "\n" + geometry_note +
-                        "\n先根据这份当前观测说明下一批的目的。历史只用来比较动作效果，不能把旧球位置当成现在。"})
+                        "\n这是另一次模型看图得到的描述，位置措辞也可能看错，不是程序测量。球与夹指在哪里、前后怎样变化，"
+                        "直接核对当前照片和对应的历史照片；不能把两次粗估坐标的差当成球移动的证据。再说明下一批的目的。"})
         # Include adjacent goals so a visually confirmed boundary needs no second model call.
         goals = "\n\n".join(f"{name}: {goal}" for name, goal in STAGE_GOALS.items())
         messages = [{"role": "system", "content": COMMON_PROMPT + "\n阶段目标：\n" + goals +
