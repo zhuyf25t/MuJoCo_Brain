@@ -283,11 +283,11 @@ class LangGraphBrain(Brain):
             # in the trace and release checks, not alongside the revised geometry.
             scene.pop("evidence")
             geometry_note = (
-                "本轮初始标定的gripper由另一次结合本车外观说明的看图复核提供，帮助辨认实体掌/夹块的位置、形态和遮挡。"
+                "本轮首次抓取前的gripper由另一次结合本车外观说明的看图复核提供，帮助辨认实体掌/夹块的位置、形态和遮挡。"
                 "其中若有‘与前图比较’，是直接对照上批动作前和现在的实图，不读取动作预期或旧结论；把可见变化与实际指令对应，不把两次粗估坐标的差当成运动。"
                 "球的描述、holding、release_view仍来自原独立观测，未被复核替换；夹爪描述中提到的空爪或持球不能覆盖这些字段。"
                 "保存姿态仍须核对当前实体与地面，形态复核不是已经到达低位或就绪位的证明。")
-        scene_scope = ("当前图观测；初始gripper复核的来源与比较范围见下文" if ctx.calibration_gripper else
+        scene_scope = ("当前图观测；首次抓取前gripper复核的来源与比较范围见下文" if ctx.calibration_gripper else
                        "独立只看最后这张当前图得到；不是历史或动作预测")
         content.append({"type": "text", "text": f"current_scene（{scene_scope}）：" +
                         json.dumps(scene, ensure_ascii=False) +
@@ -316,7 +316,7 @@ class LangGraphBrain(Brain):
         state = self._consume_batch(state, ctx.commands)
         try:
             self._read_scene(ctx)
-            if (entry_node == "explore" and not state["visual_memory"]["held"] and ctx.scene["holding"] != "held" and
+            if (entry_node in {"explore", "pick"} and not state["visual_memory"]["held"] and ctx.scene["holding"] != "held" and
                     any(c["tool"] == "open_gripper" for c in ctx.commands) and
                     not any(c["tool"] == "close_gripper" for c in ctx.commands)):
                 self._read_calibration_gripper(ctx, state)
@@ -394,7 +394,8 @@ class LangGraphBrain(Brain):
             return  # An optional shape reading cannot invalidate a valid base scene.
         # Never replace holding, release evidence or coordinates with this probe.
         # A cropped opening can make occupancy unclear while the visible jaws
-        # are identifiable. Initial-calibration eligibility is checked by _plan.
+        # are identifiable. Pre-grasp eligibility is checked by _plan, including
+        # approach rounds where the raised jaw may have left only its shadow.
         ctx.calibration_gripper = report["gripper"] if report["holding"] in {"empty", "unclear"} else None
         self._gripper_cache = (cache_key, ctx.calibration_gripper)
 

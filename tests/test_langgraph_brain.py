@@ -944,16 +944,109 @@ def test_initial_comparison_excludes_non_shoulder_or_opposing_batches(actions, m
         encode_image_block(obs(40)["images"]["front"], fmt="openai")]
 
 
-def test_same_pixels_entering_pick_use_unmodified_base_without_new_observation(make_brain):
-    brain, requests = make_brain(workflow()[:5], gripper_scenes=[scene("unclear")] * 3)
+def test_same_pixels_entering_pick_keep_probe_with_scope_specific_cache(make_brain):
+    probe = {**scene("unclear"), "gripper": "CURRENT_ONLY_PICK_GEOMETRY"}
+    brain, requests = make_brain(workflow()[:4] + [plan(phase="pick"), plan(phase="pick")],
+                                gripper_scenes=[scene("unclear")] * 3 + [probe])
     history = []
-    for value in (0, 20, 40, 60, 60):
+    for value in (0, 20, 40, 60, 60, 60):
         tick(brain, history, value)
     assert len(requests.observations) == 4
-    assert len(requests.gripper_observations) == 3
-    assert planner_scene(requests[-1]) == described_scene()
+    assert len(requests.gripper_observations) == 4
+    # The explore round compared 40->60. Entering pick after a mixed batch
+    # needs current-only 60; the following identical current-only view is reused.
+    pair, single = requests.gripper_observations[-2:]
+    assert pair["messages"][0]["content"] == CALIBRATION_COMPARE_PROMPT
+    assert single["messages"][0]["content"] == CALIBRATION_VIEW_PROMPT
+    for request, values in ((pair, (40, 60)), (single, (60,))):
+        assert [p for p in request["messages"][1]["content"] if p["type"] == "image_url"] == [
+            encode_image_block(obs(v)["images"]["front"], fmt="openai") for v in values]
+    expected = {**described_scene(), "gripper": probe["gripper"]}
+    del expected["evidence"]
+    assert all(planner_scene(request) == expected for request in requests[-2:])
+    assert brain._scene_cache[1] == scene()
     rows = [json.loads(s) for s in (brain.trace_dir / "rounds.jsonl").read_text(encoding="utf-8").splitlines()]
-    assert rows[-1]["scene_reused"] and rows[-1]["calibration_gripper"] is None
+    assert rows[-1]["scene_reused"] and rows[-1]["calibration_gripper"] == probe["gripper"]
+    assert not any(r["kind"] == "calibration_gripper" for r in rows[-1]["requests"])
+
+
+@pytest.mark.parametrize("probe_holding", ["empty", "unclear"])
+def test_pregrasp_pick_probe_is_current_only_and_cannot_replace_base_fields(probe_holding, make_brain):
+    base = {**scene("unclear", "blocked"), "gripper": "BASE_SHADOW_IDENTITY", "evidence": "BASE_SHADOW_EVIDENCE"}
+    probe = {**scene(probe_holding, "candidate"), "gripper": "REAL_JAWS_OUT_OF_FRAME_GROUND_SHADOW_ONLY",
+             "ground_balls": [{"center": [.9, .9], "description": "WRONG_PROBE_BALL"}], "evidence": "WRONG_PROBE_RELEASE"}
+    brain, requests = make_brain(workflow()[:4] + [
+        plan(action("close_gripper"), phase="pick", holding="unclear"),
+        plan(action("open_gripper"), phase="pick"), plan(phase="pick")],
+        scenes=[scene()] * 4 + [base, scene(), scene()], gripper_scenes=[scene()] * 3 + [probe])
+    history = []
+    run_ticks(brain, history, 5)
+    assert input_text(requests[-1])["状态"]["phase"] == "pick"
+    request = requests.gripper_observations[-1]
+    assert request["messages"][0]["content"] == CALIBRATION_VIEW_PROMPT
+    assert [p for p in request["messages"][1]["content"] if p["type"] == "image_url"] == [
+        encode_image_block(obs(80)["images"]["front"], fmt="openai")]
+    for private in ("PRIVATE_HOLDING", "PRIVATE_RESULT", "TASK"):
+        assert private not in json.dumps(request)
+    projected = planner_scene(requests[-1])
+    assert projected["gripper"] == probe["gripper"] and "evidence" not in projected
+    assert projected["ground_balls"] == [{"description": "上方地面的球"}]
+    assert projected["holding"] == base["holding"] and projected["release_view"] == base["release_view"]
+    assert "WRONG_PROBE" not in json.dumps(requests[-1])
+    assert brain._scene_cache[1] == base and brain.state["visual_memory"]["held"] is None
+    row = json.loads((brain.trace_dir / "rounds.jsonl").read_text(encoding="utf-8").splitlines()[-1])
+    assert row["current_scene"] == base and row["calibration_gripper"] == probe["gripper"]
+    # Once the first close is actually in history, reopening in pick cannot
+    # reenable the pre-grasp probe or reuse its cached replacement text.
+    for value in (100, 120):
+        tick(brain, history, value)
+        assert planner_scene(requests[-1]) == described_scene()
+    assert len(requests.gripper_observations) == 4
+    assert [item["tool"] for item in history if item["tool"] in {"open_gripper", "close_gripper"}] == [
+        "open_gripper", "close_gripper", "open_gripper"]
+
+
+def test_pick_current_or_remembered_holding_skips_pregrasp_probe(make_brain):
+    brain, requests = make_brain(workflow()[:4] + [plan(phase="pick", holding="unclear")] * 2,
+                                scenes=[scene()] * 4 + [scene("held", "blocked"), scene("unclear", "blocked")],
+                                gripper_scenes=[scene()] * 3)
+    history = []
+    run_ticks(brain, history, 6)
+    assert len(requests.gripper_observations) == 3
+    assert all(input_text(request)["状态"]["phase"] == "pick" for request in requests[-2:])
+    assert planner_scene(requests[-2]) == described_scene("held", "blocked")
+    assert planner_scene(requests[-1]) == described_scene("unclear", "blocked")
+    assert brain.state["visual_memory"]["held"] is not None
+    assert not any(item["tool"] == "close_gripper" for item in history)
+
+
+def test_pick_without_executed_open_does_not_enable_pregrasp_probe(make_brain):
+    brain, requests = make_brain([plan(action("arm_pose", pose="reach"), holding="unclear")] +
+                                workflow()[1:4] + [plan(phase="pick")], gripper_scenes=[])
+    run_ticks(brain, [], 5)
+    assert input_text(requests[-1])["状态"]["phase"] == "pick"
+    assert not requests.gripper_observations
+    assert planner_scene(requests[-1]) == described_scene()
+
+
+@pytest.mark.parametrize("probe", [{}, scene("held"), httpx.ReadTimeout("pick geometry timeout")])
+def test_failed_or_held_pick_probe_keeps_base_usable_and_caches_fallback(probe, make_brain):
+    base = {**scene("unclear", "blocked"), "gripper": "VALID_BASE_GEOMETRY"}
+    brain, requests = make_brain(workflow()[:4] + [
+        plan(action("forward", seconds=.2), phase="pick", holding="unclear"),
+        plan(phase="pick", holding="unclear")],
+        scenes=[scene()] * 4 + [base], gripper_scenes=[scene()] * 3 + [probe])
+    history = []
+    run_ticks(brain, history, 4)
+    assert [d.tool for d in tick(brain, history, 80)] == ["forward"]
+    assert [d.tool for d in tick(brain, history, 80)] == ["observe"]
+    expected = {**base, "ground_balls": [{"description": "上方地面的球"}]}
+    assert all(planner_scene(request) == expected for request in requests[-2:])
+    assert len(requests) == 6 and len(requests.observations) == 5 and len(requests.gripper_observations) == 4
+    assert brain._scene_cache[1] == base and brain.state["visual_memory"]["held"] is None
+    row = json.loads((brain.trace_dir / "rounds.jsonl").read_text(encoding="utf-8").splitlines()[-1])
+    assert row["current_scene"] == base and row["calibration_gripper"] is None
+    assert not any(r["kind"] == "calibration_gripper" for r in row["requests"])
 
 
 def test_close_then_open_in_explore_does_not_reenable_initial_geometry_probe(make_brain):
