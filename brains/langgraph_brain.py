@@ -195,7 +195,7 @@ class LangGraphBrain(Brain):
         candidates = []
         if state["last_batch"]:
             candidates.append(("历史：上批动作前图", state["last_batch"]["before"]))
-        pose_refs = () if state["phase"] == "place" else (("grasp", "张爪朝下、靠近地面的抓球参考"), ("clearance", "抬肩后能看球看路的就绪参考"))
+        pose_refs = () if state["phase"] == "place" else (("grasp", "朝下张爪的候选抓球姿态参考"), ("clearance", "抬肩后能看球看路的就绪参考"))
         for key, label in pose_refs:
             if state["calibration"][key]:
                 candidates.append(("历史：" + label, state["calibration"][key]["frame"]))
