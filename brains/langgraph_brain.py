@@ -174,11 +174,11 @@ class LangGraphBrain(Brain):
             ctx.release_needs_new_frame = True
             raise ValueError("持球时定位与释放不能同批：先完成转向/接近/调臂，看下一张图后再松爪；本轮重规划也不能删除定位动作直接松爪")
         if ctx.release_needs_new_frame:
-            raise ValueError("本轮先前计划还需要定位，没有新图不能改称已经到位；保持闭爪，完成必要定位或观察后再判断释放")
+            raise ValueError("本轮先前计划还需要定位，没有新图不能改称已经到位；维持最近执行的夹爪命令，完成必要定位或观察后再判断释放")
         if ctx.scene["holding"] != "held" or report["holding"] != "held":
-            raise ValueError("可能持球但当前夹持关系看不清，先保持闭爪改善观察；规划改称held不能替代独立当前图确认")
+            raise ValueError("可能持球但当前夹持关系看不清，先维持最近执行的夹爪命令并改善观察；规划改称held不能替代独立当前图确认")
         if ctx.scene["release_view"] != "candidate":
-            raise ValueError("独立当前图观测不支持释放：" + ctx.scene["evidence"] + "。保持闭爪，先解决高度、前后位置或观察问题")
+            raise ValueError("独立当前图观测不支持释放：" + ctx.scene["evidence"] + "。维持最近执行的夹爪命令，先解决高度、前后位置或观察问题")
         if report["phase"] != "place":
             raise ValueError("持球松爪属于place，先确认投放位置")
         check = report.get("release_check")
@@ -188,7 +188,7 @@ class LangGraphBrain(Brain):
         self._text(check["evidence"], "release_check.evidence")
         target = original["visual_memory"]["target"]
         if not target or target["kind"] != "bin":
-            raise ValueError("刚找到箱子不能凭单图重叠释放；先保存箱子图，保持闭爪接近/调臂再比较")
+            raise ValueError("刚找到箱子不能凭单图重叠释放；先保存箱子图，维持最近执行的夹爪命令，接近/调臂后再比较")
         since = ctx.commands[target["frame"]["history_n"]:]
         if (target["frame"]["image_id"] == ctx.frame["image_id"] or
                 not any(c["tool"] in DEPTH_TOOLS for c in since)):
@@ -570,7 +570,7 @@ class LangGraphBrain(Brain):
         gripper = [c["tool"] for c in ctx.commands if c["tool"] in {"open_gripper", "close_gripper"}]
         may_hold = self._may_hold(state, ctx, report)
         if may_hold and view == "empty" and ctx.scene["holding"] != "empty":
-            raise ValueError("独立当前图没有确认空爪，不能用规划中的empty清除可能持球；先保持闭爪改善观察")
+            raise ValueError("独立当前图没有确认空爪，不能用规划中的empty清除可能持球；先维持最近执行的夹爪命令并改善观察，已张开不代表需要重新闭合")
         if view == "held" and ctx.scene["holding"] == "empty":
             raise ValueError("独立当前图报告空爪，不能直接声称持球；先核对图片、改善观察")
         if "learning" in report and state["last_batch"] is not None:
@@ -637,7 +637,7 @@ class LangGraphBrain(Brain):
             if view == "held" and phase != "place" and not securing_grasp:
                 raise ValueError("holding=held与当前阶段不一致；若确已夹稳可进入place，若证据仍不确定应如实填unclear，不要为换阶段省掉尚未执行的抓取与确认动作")
             if original["phase"] == "place" and phase == "pick" and view != "empty":
-                raise ValueError("回捡球须当前看清空爪/掉球；看不清可保持闭爪改善视野或回explore恢复参照")
+                raise ValueError("回捡球须当前看清空爪/掉球；看不清可维持最近执行的夹爪命令并改善视野，或回explore恢复参照")
         if "target" in report:
             target = report["target"]
             if target is not None:
