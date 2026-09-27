@@ -1,0 +1,4 @@
+# Optional LangGraph brain: python -m pip install -r requirements-langgraph.txt
+-r requirements.txt
+langgraph==1.2.12
+langgraph-checkpoint-sqlite==3.1.1

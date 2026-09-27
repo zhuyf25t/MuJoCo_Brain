@@ -36,6 +36,9 @@ def build_brain(name: str, env: MobileManipEnv):
     if name == "openai":
         from brains import OpenAICompatBrain
         return OpenAICompatBrain()
+    if name == "langgraph":
+        from brains.langgraph_brain import LangGraphBrain
+        return LangGraphBrain()
     if name == "anthropic":
         from brains import AnthropicBrain
         return AnthropicBrain()
@@ -130,7 +133,7 @@ def run_episode(env, brain, tool_schemas, task_text, ep_dir, gui=None,
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="MuJoCo_Brain 数据采集")
     ap.add_argument("--brain", default="scripted",
-                    choices=["scripted", "openai", "anthropic"])
+                    choices=["scripted", "openai", "anthropic", "langgraph"])
     ap.add_argument("--episodes", type=int, default=3)
     ap.add_argument("--task", default=None, help="任务文本, 如 '把红色方块放进箱子'")
     ap.add_argument("--gui", action="store_true", help="打开 MuJoCo 交互窗口")

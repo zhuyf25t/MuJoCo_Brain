@@ -97,7 +97,14 @@ class ToolLayer:
         def done(success: bool) -> tuple[bool, str]:            # noqa: ARG001
             return True, "任务结束"
 
+        def observe() -> tuple[bool, str]:
+            # No pose/holding feedback: simply stop drive and allow a new frame.
+            self.robot.command_drive(0.0, 0.0)
+            self.robot.step_ticks(2, self.on_tick)
+            return True, "已发送底盘停止指令并等待两个控制拍，可重新观察"
+
         add = self._add
+        add(Tool("observe", "停止底盘并短暂等待，下一轮取得新图；保持机械臂和夹爪目标", {}, [], observe))
         add(Tool("forward", "底盘前进", {"seconds": _s("前进时长")}, [], forward))
         add(Tool("back", "底盘后退", {"seconds": _s("后退时长")}, [], back))
         add(Tool("turn_left", "底盘原地左转(逆时针)", {"seconds": _s("左转时长")}, [], turn_left))

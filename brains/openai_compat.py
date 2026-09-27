@@ -13,8 +13,9 @@ import httpx
 
 import config
 from .base import Brain, Decision
-from .llm_common import (SYSTEM_PROMPT, encode_image_block, history_summary,
-                         llm_log, obs_text, parse_json_toolcall, term_show_image)
+from .llm_common import (encode_image_block, llm_log, parse_json_toolcall,
+                         term_show_image)
+from .visual_context import SYSTEM_PROMPT, task_text as visual_task_text
 
 
 class OpenAICompatBrain(Brain):
@@ -96,25 +97,29 @@ class OpenAICompatBrain(Brain):
         raise last_err or RuntimeError("无可用端点")
 
     def decide(self, obs, task_text, tool_schemas, history) -> list[Decision]:
+        # Explicit allowlist: extra cameras or simulator state in obs must never
+        # become model inputs, even if a caller supplies them in the future.
+        front = obs.get("images", {}).get("front")
+        if front is None:
+            raise ValueError("OpenAI 视觉决策需要 images.front 车头图片")
         tools = [{"type": "function",
                   "function": {"name": t["name"], "description": t["description"],
                                "parameters": t["input_schema"]}}
                  for t in tool_schemas]
         note = ""
         for attempt in range(2):
-            user_content: list = []
-            for cam, rgb in obs.get("images", {}).items():
-                user_content.append({"type": "text", "text": f"相机 {cam} 当前画面:"})
-                user_content.append(encode_image_block(rgb, fmt="openai"))
-            user_content.append({"type": "text", "text": obs_text(obs, task_text, history) + note})
+            user_content = [
+                {"type": "text", "text": "车头相机 front 当前画面:"},
+                encode_image_block(front, fmt="openai"),
+                {"type": "text", "text": visual_task_text(task_text, history) + note},
+            ]
             messages = [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": user_content},
             ]
             user_txt = " ".join(p["text"] for p in user_content if p.get("type") == "text")
             n_img = sum(1 for p in user_content if p.get("type") == "image_url")
-            for cam, rgb in obs.get("images", {}).items():
-                term_show_image(rgb, label=f"→ 发给模型的相机图 [{cam}]")
+            term_show_image(front, label="→ 发给模型的相机图 [front]")
             llm_log("LLM→模型", f"图x{n_img} | {user_txt[:400]}")
             data = self._request(messages, tools)
             choice = data.get("choices", [{}])[0]
