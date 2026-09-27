@@ -236,6 +236,11 @@ class LangGraphBrain(Brain):
         for tool in tools:
             if tool["name"] in {"shoulder", "elbow"}:
                 tool["description"] = "让这个关节改变delta弧度；不是持续秒数，爪抬高还是降低要比较前后图"
+            elif tool["name"] in {"turn_left", "turn_right"}:
+                turn, shift = ("左", "右") if tool["name"] == "turn_left" else ("右", "左")
+                tool["description"] += (f"；{turn}指车头的转向，不是景物在画面的移动方向。"
+                                        f"固定车头相机中，同一静止车外物体在原地{turn}转后通常向画面{shift}侧移动；"
+                                        "遮挡后的重现或另一颗球入画不能当成同一球的位移")
         projected_state = deepcopy(state)
         if not motion_applies:
             projected_state["motion_example"] = None
