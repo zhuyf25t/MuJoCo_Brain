@@ -187,8 +187,20 @@ arm_view每轮描述当前相对照片的爪形态：grasp=回到低位形态，
 从就绪返回低位后，只需arm_view=grasp来确认，不要重复保存grasp_reference；重新保存意味着开始一套新方法，会清空旧就绪图和双向动作。
 （一种可行方式：若按已学动作却明显对不上照片，回explore，clearance_reference=null废弃往返关系，再认出低位或重新保存低位；肘固定后重建两个方向。不要凭历史指令算出一个所谓“当前角度”（仅供参考））
 
+一次修正怎样交给下一轮：
+last_batch保存上一批为什么这样做(reason)、实际指令(actions)、希望下一图出现什么(expected)，以及当时对更早一批的review。本轮要评价的是上批执行后现在实际变成了什么，不能把旧review当成本轮已经评价过。
+从进入pick开始，每轮都用review回应上批；只要correction还存在，即使暂回explore或进入place，也仍要回应。review.evidence说当前图与上批预期哪里相符、哪里不符；hypothesis说最可能的原因及尚未确定处，可以坦白说不知道。不是每轮都必须失败：正常接近、有进展但还没到目标时，result用progress。
+发现抓空、走过、走偏或结果无法确认时，用unchanged（未改善）、worse（偏差更大）或unclear（看不清结果）。没有correction时，系统把这次偏差和实际前后图保存为一个待解决问题；已有问题时，保留最初事实，只更新原因假设。后续的progress、unchanged、worse、unclear都不会把它抹掉。问题存在时，评价要针对原problem：抬肩找回球可以完成观察这一步，但球仍未对好，就没有解决原问题。
+只有当前图已经支持原问题得到解决，review.result才用resolved，并在evidence说清依据。准备去修、刚发出修正动作、换了阶段、重新看见绿色，都不是结清依据。若改换目标使原问题不再适用，也要明确说明现在为何可以结束旧问题，不能悄悄丢掉。resolved只管理这份记忆，不代表已经持球、可以释放或任务成功。
+reason说明接下来准备针对什么偏差、为何选这些方向和幅度，expected说明下一张图怎样检验；它们和actions会原样交给下一轮。这样下一轮要接着检查这次方案，不是从“又看到球了”重新开始。原因改变时可以推翻旧假设，但不能把尚未执行的解决方案写成已经发生的事实。
+
+前进、后退的时长怎样积累经验：
+捡球或仍有correction时，上一批实际包含forward/back，就必须在motion_effect里比较该批前后图。target_match=same表示能对应同一目标，effect说明实际变近/变远、左右偏差、过头或仍差多少，以及哪里看不清；无法对应就写unclear，明确换了目标写different，不必强行估出位移。系统仅在same时保留这组motion_example，前后图、完整实际动作与执行阶段由程序绑定，中间几轮抬肩或观察不会把它冲掉。样本只在相同阶段作为参照提供，捡球样本不会被当作投箱距离经验。不是刚准备前进，就可以先记录一个预测的运动效果。
+motion_example是最近一次局部试验，correction还保留最初发生偏差的那次试验；比较时可看两组实图和各自真实时长。它们不是固定速度表：越接近球，等时长带来的画面变化越大；目标换了、转过车、球滚过或被挡住时，原来的估量可能不再适用。一个批次里若先转向再前进又降肩，只能说明整批的结果，不能假装分别看过中间每一步，也不能把全部变化归给前进。
+（一种可行方式：上次前进1.5秒过头，后来后退0.6秒让同一颗球从极近退到仍略近，就把这两次实际效果作为幅度参照；这次只检验剩下的一小段距离，可选择更短的后退，并在reason解释这个选择。执行后再看是否真的缩小了近侧偏差、是否过退，再决定下一段。这里的数字是说明推理方法，不是本任务固定时长；不把两次粗估坐标相减后除以秒数当成可靠速度，也不编造米数（仅供参考））
+
 输出字段和照片的对应关系：
-learning只补充本轮新看到的事实和仍不确定处，系统保留最近四条，稳定的肩往返经验另存在moves，不需要在文字里反复总结。未执行的预测只写expected；尚未松爪时不能把“已经学会投放”写成经验。同批肩肘都动了，只能说组合效果。没有动作历史时不编造已学经验。
+learning只补充短期探索经验和仍不确定处，系统保留最近四条，稳定的肩往返经验另存在moves。待解决偏差由correction保留，局部运动效果由motion_example保留，不依靠这四条滚动文字接力。未执行的预测只写expected；尚未松爪时不能把“已经学会投放”写成经验。同批肩肘都动了，只能说组合效果。没有动作历史时不编造已学经验。
 当前球的坐标、数量和现在在哪里由current_scene每轮重读，不要再抄进learning。learning保留动作方向、动作前后发生的变化和待解决的问题，避免旧场景文字冒充当前观测。
 释放还受current_scene约束：release_view=blocked或unclear不能用你自己填的release_check=true消除。可能持球时，独立观测没有确认empty，就不能改报empty来张爪；独立观测或你的holding仍为unclear时，也不能靠改称held获得释放许可。保持闭爪，完成有明确目的的位置或视线调整，等新图。判断被否决不是任务失败，不因此done，也不因轮数少就释放。
 grasp_reference={region:[left,top,right,bottom],note:...}保存当前可见、朝下张爪的候选抓球图和估计球心区域，坐标归一化到0到1；note区分手指和地面的可见依据与尚未确定的离地间隙。它不证明高度已经适合抓球，空爪时估的区域也只帮助接近，仍需要球与返回后的夹指同图检验。
@@ -216,6 +228,18 @@ def plan_tool(tool_names):
                              "description": "当前图片中的爪相对参考姿态；不能由指令累计或影子断言到位"},
                 "reason": text, "expected": text,
                 "learning": {**text, "description": "本轮新观察的经验或不确定处；稳定肩动作由系统单独保留"},
+                "review": {"type": "object", "additionalProperties": False,
+                    "description": "进入捡球后的每轮或已有correction时必填。评价已执行上批及尚未解决的原问题，不是本批预测。",
+                    "required": ["result", "evidence", "hypothesis"], "properties": {
+                        "result": {"type": "string", "enum": ["progress", "unchanged", "worse", "unclear", "resolved"],
+                            "description": "有进展/未改善/变差/未知均保留旧问题；resolved仅在当前证据已解决现有correction时结清"},
+                        "evidence": {**text, "description": "当前图与上批目的、预期的实际差别；有correction时说明原问题还有什么未解决"},
+                        "hypothesis": {**text, "description": "根据实际结果更新的原因假设与未知处；没有新偏差可以说明进展正常，不编造原因"}}},
+                "motion_effect": {"type": "object", "additionalProperties": False,
+                    "description": "捡球或存在correction时，上批实际含forward/back则必填；目标未知可如实说明。照片、完整已执行动作及执行阶段由程序绑定，本批预测不算经验。",
+                    "required": ["target_match", "effect"], "properties": {
+                        "target_match": {"type": "string", "enum": ["same", "different", "unclear"]},
+                        "effect": {**text, "description": "同一目标的可见变化、实际偏差及适用限制；组合动作只说明整批作用，不编造固定速度或实测距离"}}},
                 "release_check": {"type": "object", "additionalProperties": False,
                     "required": ["clear_drop_path", "inside_opening", "evidence"], "properties": {
                         "clear_drop_path": {"type": "boolean", "description": "球从当前位置沿重力方向下落不会撞箱沿或外壁；可以已部分进入箱口，不要求整颗仍高过沿"},

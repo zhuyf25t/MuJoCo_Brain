@@ -45,12 +45,15 @@ class EpisodeState(TypedDict):
     arm_anchor: dict | None
     visual_memory: dict
     last_batch: dict | None
+    correction: dict | None
+    motion_example: dict | None
 
 
 def initial_state() -> EpisodeState:
     return {"phase": "explore", "calibration": {"lessons": [], "grasp": None, "clearance": None,
             "moves": {"to_grasp": None, "to_clearance": None}}, "arm_anchor": None,
-            "visual_memory": {"target": None, "held": None}, "last_batch": None}
+            "visual_memory": {"target": None, "held": None}, "last_batch": None,
+            "correction": None, "motion_example": None}
 
 
 @dataclass
@@ -192,9 +195,17 @@ class LangGraphBrain(Brain):
             raise ValueError("须比较接近或调臂前后的箱子图；只有转向、等待或同一张图不能确认前后关系")
 
     def _messages(self, state, ctx, note=""):
+        # Keep a useful trial across recovery, but do not show a pickup ball scene
+        # as a placement motion reference (or the reverse).
+        motion_example = state.get("motion_example")
+        motion_applies = motion_example is not None and motion_example["phase"] == state["phase"]
         candidates = []
         if state["last_batch"]:
             candidates.append(("历史：上批动作前图", state["last_batch"]["before"]))
+        for key, label in (("correction", "尚未解决的问题"), ("motion_example", "最近一次局部底盘运动经验")):
+            if state.get(key) and (key != "motion_example" or motion_applies):
+                candidates.append((f"历史：{label}，动作前", state[key]["before"]))
+                candidates.append((f"历史：{label}，动作后", state[key]["after"]))
         pose_refs = () if state["phase"] == "place" else (("grasp", "朝下张爪的候选抓球姿态参考"), ("clearance", "抬肩后能看球看路的就绪参考"))
         for key, label in pose_refs:
             if state["calibration"][key]:
@@ -218,13 +229,30 @@ class LangGraphBrain(Brain):
                     found[0] += f"；也对应{label}(动作数{frame['history_n']})"
             else:
                 images.append([label, frame])
+        # Several retained trials may overlap. Read the merged historical frames
+        # in time order, then the uniquely labelled current frame.
+        images = sorted(images[:-1], key=lambda entry: entry[1]["history_n"]) + images[-1:]
         tools = deepcopy(ctx.tools)
         for tool in tools:
             if tool["name"] in {"shoulder", "elbow"}:
                 tool["description"] = "让这个关节改变delta弧度；不是持续秒数，爪抬高还是降低要比较前后图"
-        body = {"任务": ctx.task, "决策轮": f"{ctx.round_no}/{config.MAX_DECISIONS}", "状态": state,
+        projected_state = deepcopy(state)
+        if not motion_applies:
+            projected_state["motion_example"] = None
+        body = {"任务": ctx.task, "决策轮": f"{ctx.round_no}/{config.MAX_DECISIONS}", "状态": projected_state,
                 "剩余看图决策次数（含本轮）": max(0, config.MAX_DECISIONS - ctx.round_no + 1),
                 "最近调用的指令": ctx.commands[-config.HISTORY_LINES:], "可用工具": tools}
+        examples = {}
+        for key in ("correction", "motion_example"):
+            sample = state.get(key)
+            if sample and (key != "motion_example" or motion_applies):
+                examples[key] = deepcopy(ctx.commands[sample["before"]["history_n"]:sample["after"]["history_n"]])
+        if examples:
+            body["两组历史前后图之间实际执行的完整动作"] = examples
+            body["本轮先接着解决什么"] = (
+                "correction的problem是尚未解决的原问题。先评价last_batch.reason所说的修正目的、expected与当前图是否相符，"
+                "再更新原因假设和下一批动作；仅恢复视线不是解决原问题。motion_example只是一段局部运动的视觉经验，"
+                "时长来自这里列出的真实指令，效果来自模型看图，不能当成程序测距。目标、近远或朝向变了须重新判断适用性。")
         body["图像与历史文字的时间"] = ("最后一张才是唯一当前图。历史note/learning里的位置、大小以及‘当前’都是当时的描述，"
                                   "不能作为现在的球位置；先看最后一图，历史只用于比较变化和复用动作。")
         body["抓球区域含义"] = ("grasp.region是估计的球心接近位置，不是球的外接框或已证明能夹住的位置。"
@@ -468,11 +496,60 @@ class LangGraphBrain(Brain):
             raise ValueError("region 需要 [left,top,right,bottom]，满足0到1且面积非零")
         return {"frame": ctx.frame, "region": deepcopy(box), "note": self._text(ref["note"], field + ".note")}
 
+    def _apply_feedback(self, original, state, ctx, report):
+        """Retain observed problems; visual conclusions still belong to the model."""
+        previous = original["last_batch"]
+        active = original.get("correction")
+        required = previous is not None and (active is not None or original["phase"] == "pick" or report["phase"] == "pick")
+        review = report.get("review")
+        if review is None:
+            if required:
+                raise ValueError("本轮须用review回应已执行上批的实际结果；待修正问题不能因省略而消失。先看当前图，再说明进展、未改善、变差、未知或已经解决")
+        else:
+            if (not isinstance(review, dict) or set(review) != {"result", "evidence", "hypothesis"} or
+                    review["result"] not in {"progress", "unchanged", "worse", "unclear", "resolved"}):
+                raise ValueError("review须含result(progress/unchanged/worse/unclear/resolved)、当前实图evidence和原因假设hypothesis")
+            evidence = self._text(review["evidence"], "review.evidence")
+            hypothesis = self._text(review["hypothesis"], "review.hypothesis")
+            result = review["result"]
+            if previous is None:
+                if result != "progress":
+                    raise ValueError("首轮尚无已执行批次，不能凭未来动作建立或结清修正记录")
+            elif result == "resolved":
+                if active is None:
+                    raise ValueError("没有待结清的correction；正常进展用progress，不把本批未来效果记成resolved")
+                state["correction"] = None
+            elif active is not None:
+                # A successful observation substep need not solve the original problem.
+                state["correction"]["hypothesis"] = hypothesis
+            elif result in {"unchanged", "worse", "unclear"}:
+                state["correction"] = {"problem": evidence, "hypothesis": hypothesis,
+                                       "before": deepcopy(previous["before"]), "after": deepcopy(ctx.frame)}
+
+        moved_base = previous is not None and any(a["tool"] in {"forward", "back"} for a in previous["actions"])
+        if required and moved_base and "motion_effect" not in report:
+            raise ValueError("上批实际包含前进或后退，须用motion_effect报告前后效果；目标对应不清可填unclear，不要省略这次运动的反馈")
+        if "motion_effect" in report:
+            effect = report["motion_effect"]
+            if (not isinstance(effect, dict) or set(effect) != {"target_match", "effect"} or
+                    effect["target_match"] not in {"same", "different", "unclear"}):
+                raise ValueError("motion_effect须含target_match(same/different/unclear)及前后图可见effect")
+            description = self._text(effect["effect"], "motion_effect.effect")
+            if not moved_base:
+                raise ValueError("运动经验只能来自已经执行过前进或后退的上批；本批将要执行的动作、纯抬肩都不是新的底盘运动经验")
+            if effect["target_match"] == "same":
+                state["motion_example"] = {"before": deepcopy(previous["before"]),
+                                           "after": deepcopy(ctx.frame), "effect": description,
+                                           "phase": original["phase"]}
+            # An obscured/different target cannot overwrite the useful comparison.
+        return deepcopy(review)
+
     def _apply_plan(self, original, ctx, report):
         if not isinstance(report, dict):
             raise ValueError("计划必须是 JSON 对象")
         if set(report) - {"phase", "holding", "reason", "expected", "actions", "learning",
-                          "grasp_reference", "grasp_region", "clearance_reference", "target", "arm_view", "release_check"}:
+                          "grasp_reference", "grasp_region", "clearance_reference", "target", "arm_view", "release_check",
+                          "review", "motion_effect"}:
             raise ValueError("计划包含未知字段，请按report_plan定义输出")
         if report.get("phase") not in STAGE_GOALS:
             raise ValueError("phase 必须为 explore/pick/place，表示当前证据支持的工作阶段")
@@ -573,13 +650,15 @@ class LangGraphBrain(Brain):
             state["visual_memory"]["held"] = None
         # Neither predicted holding nor predicted joint positions are observations.
         state["phase"] = phase
-        return self._emit_batch(state, ctx, actions, reason, expected)
+        review = self._apply_feedback(original, state, ctx, report)
+        return self._emit_batch(state, ctx, actions, reason, expected, review=review)
 
     @staticmethod
-    def _emit_batch(state, ctx, actions, reason, expected):
+    def _emit_batch(state, ctx, actions, reason, expected, *, review=None):
         state = deepcopy(state)
         state["last_batch"] = {"before": ctx.frame, "history_n": len(ctx.commands),
-                               "actions": deepcopy(actions), "expected": expected}
+                               "actions": deepcopy(actions), "reason": reason, "expected": expected,
+                               "review": deepcopy(review)}
         ctx.decisions = [Decision(f"[{state['phase']}] {reason} | 预期：{expected}" if i == 0 else "",
                                   action["tool"], deepcopy(action["args"])) for i, action in enumerate(actions)]
         return state
@@ -608,7 +687,7 @@ class LangGraphBrain(Brain):
                 raise RuntimeError("图未产生动作批次")
             self._round = ctx.round_no
         finally:
-            self.memory.log({"format_version": 7, "round": ctx.round_no, "model": self.llm.model,
+            self.memory.log({"format_version": 8, "round": ctx.round_no, "model": self.llm.model,
                              "entry_node": ctx.entry_node, "action_phase": self.state.get("phase"),
                              "current_frame": ctx.frame, "current_scene": ctx.scene, "scene_reused": ctx.scene_reused,
                              "calibration_gripper": ctx.calibration_gripper,
