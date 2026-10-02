@@ -1,0 +1,25 @@
+# Per-capability overrides inherit defaults; model: null uses the project's .env.
+calibration_id: front-camera-arm-v1
+max_decisions: 64
+max_unknown: 3
+max_info_requests: 4
+probe_seconds: 0.2
+max_motion_seconds: 2.0
+defaults:
+  backend: llm
+  model: null
+  max_tokens: 8192 # Includes the reasoning budget when thinking is enabled.
+  timeout_s: 60
+  attempts: 2
+  thinking: enabled
+  reasoning_effort: low
+capabilities:
+  find_ball: {prompt: find_ball.txt}
+  find_box: {prompt: find_box.txt}
+  match_grasp: {prompt: match_grasp.txt} # backend: polygon enables the program implementation.
+  plan_motion: {prompt: plan_motion.txt}
+  check_held: {prompt: check_held.txt}
+  match_drop: {prompt: match_drop.txt}
+  check_drop: {prompt: check_drop.txt}
+  analyze_reach: {prompt: analyze_reach.txt}
+  analyze_motion: {prompt: analyze_motion.txt}

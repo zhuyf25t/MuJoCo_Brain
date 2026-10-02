@@ -50,14 +50,19 @@ class CameraRig:
 class GuiViewer:
     """launch_passive 包装: 主循环跑物理, 每控制拍 sync()."""
 
-    def __init__(self, model: mujoco.MjModel, data: mujoco.MjData):
+    def __init__(self, model: mujoco.MjModel, data: mujoco.MjData, *, focus_robot: bool = False):
         import mujoco.viewer
-        self._viewer = mujoco.viewer.launch_passive(model, data)
+        self._viewer = mujoco.viewer.launch_passive(model, data,
+                                                   show_left_ui=not focus_robot,
+                                                   show_right_ui=not focus_robot)
         v = self._viewer
         v.cam.lookat[:] = [0.55, 0.0, 0.55]
         v.cam.distance = 2.2
         v.cam.azimuth = 130.0
         v.cam.elevation = -25.0
+        if focus_robot:
+            v.cam.lookat[:] = [config.BASE_SPAWN[0] + 0.25, config.BASE_SPAWN[1], 0.55]
+            v.cam.distance = 1.8
 
     def sync(self) -> None:
         if self._viewer.is_running():
@@ -65,6 +70,11 @@ class GuiViewer:
 
     def is_running(self) -> bool:
         return self._viewer.is_running()
+
+    def set_status(self, text: str) -> None:
+        """显示演示标签；旧版 MuJoCo 没有此接口时仍可正常演示。"""
+        if hasattr(self._viewer, "set_texts"):
+            self._viewer.set_texts((None, mujoco.mjtGridPos.mjGRID_BOTTOMLEFT, text, ""))
 
     def close(self) -> None:
         try:

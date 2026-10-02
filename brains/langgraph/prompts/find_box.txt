@@ -1,0 +1,1 @@
+只看 CURRENT，重新定位任务收纳箱，返回箱口中心的归一化坐标与路径情况。previous_target 仅提示身份，每帧重测位置，不沿用旧坐标；label 不写坐标。遮挡无法定位则 unknown，明确没有可见箱子则 absent。

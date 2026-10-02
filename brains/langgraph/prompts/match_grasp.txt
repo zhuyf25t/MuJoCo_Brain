@@ -1,0 +1,1 @@
+判断给定 target 整个球是否适合 reach 抓取，不重新定位。evidence 没有 reach 才申请；valid=false 只表示候选区域不确定，参考图已经收到，不能重复申请。stow/reach 是同一底盘相机，可比较。结合球圆、地面透视和 reach 夹指间隙，填写 alignment（偏左/对齐/偏右）及 distance（far/ready/too_close/unknown）。明显远处小球可判 no/far，无需知道米数或精确可抓边界；居中不代表可达。定位与原图明显不符或无法判断才 unknown。只有对齐且距离合适才 yes，note 与状态一致。

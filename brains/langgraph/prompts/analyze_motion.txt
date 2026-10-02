@@ -1,0 +1,1 @@
+比较 BEFORE→commands→AFTER CURRENT。若 comparison_target 与 target 确为同一静止物体且两次定位可信，source=shared_target，before/after=null；程序复用定位圆心，不再测坐标。否则可选同一背景箱角/墙角，source=background 并填写坐标，不重新标球。目标疑似被推、出画、遮挡或无法对应则 valid=false。机械臂/阴影不是静物参照。note 只说明图像变化及适用远近，不把像素速度当固定物理速度。

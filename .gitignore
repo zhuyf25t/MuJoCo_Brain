@@ -17,7 +17,6 @@ htmlcov/
 /tmp/
 *.log
 MUJOCO_LOG.TXT
-/brains/langgraph_temporary_file.sqlite*
 
 # Local credentials and machine-specific configuration
 .env

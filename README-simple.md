@@ -44,6 +44,7 @@
 - `.\.venv-gui\Scripts\python.exe run_collect.py`：默认使用 `scripted` 运行 3 集，初始种子为 0，保存到项目内 `data/episodes/`，不显示 GUI。
 - `.\.venv-gui\Scripts\python.exe run_collect.py --brain scripted --episodes 10`：运行 10 集规则策略；无需 API Key，采集过程不训练模型。
 - `.\.venv-gui\Scripts\python.exe run_collect.py --brain openai --episodes 1`：使用 OpenAI 兼容协议调用 `.env` 中的端点和模型；`openai` 是协议适配器名字，模型可以是 DeepSeek。
+- 新 LangGraph 已接入 `--brain langgraph`，五阶段设计见 [brains/langgraph.md](brains/langgraph.md)，运行与逐文件说明见 [brains/langgraph/README.md](brains/langgraph/README.md)。
 - `.\.venv-gui\Scripts\python.exe run_collect.py --brain anthropic --episodes 1`：使用 Anthropic 协议；需要单独配置 `.env` 中的 `ANTHROPIC_API_KEY`、`ANTHROPIC_BASE_URL`、`ANTHROPIC_MODEL`。
 - `.\.venv-gui\Scripts\python.exe run_collect.py --brain scripted --episodes 2 --out output/my_run`：将新记录写到 `output/my_run/ep_0000/`、`ep_0001/` 等；输出根目录不存在时自动创建。`--out` 接收数据根目录，不是单个 JSON 文件。
 - `.\.venv-gui\Scripts\python.exe run_collect.py --episodes 3 --seed 42`：三集分别使用种子 42、43、44；默认 `--seed 0`。新一次命令不会按已有 episode 编号自动接续种子。
@@ -130,6 +131,7 @@
 
 - `scripted`：没有神经网络或远程模型；当前实现通过 HAL 再取车头图片和本体状态，做本地颜色检测、距离/方位估计，再用规则选择动作。它不是只读一份坐标 JSON。
 - `openai`（当前 DeepSeek）：只发送当前车头图片、任务、视觉决策提示词、可用工具、最近最多 12 次动作名称及参数；不运行 `perception.py` 来生成输入，也不发送原始工具反馈或执行成功标记。暂不发送历史图片。
+- `langgraph`：五阶段视觉流程，各判断模块独立选择模型和短 prompt；用 `python run_collect.py --brain langgraph --episodes 1 --gui --keep-open` 看一轮。
 - `anthropic`：同样发送车头图片、任务、工具和动作历史；当前文字观测包含底盘位姿、夹爪开度和 TCP 坐标，与 OpenAI 适配器的文字摘要尚不完全一致。
 
 `scripted` 和 `anthropic` 保留原有观测和工具反馈。仿真反馈仍会出现在终端和本地日志，这不表示它进入了 DeepSeek 请求；OpenAI 出口统一过滤执行反馈，仅留下指令名称及参数。

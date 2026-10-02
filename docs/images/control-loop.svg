@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="940" height="382" viewBox="0 0 940 382" role="img" aria-labelledby="title">
+  <title id="title">底层控制循环</title>
+  <defs>
+    <marker id="arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 8 4 L 0 8" fill="none" stroke="#24292f"/>
+    </marker>
+  </defs>
+  <rect width="940" height="382" rx="6" fill="#f6f8fa"/>
+  <g fill="none" stroke="#24292f" stroke-width="1">
+    <path d="M 796 82 V 42 H 136 V 72" marker-end="url(#arrow)"/>
+    <rect x="24" y="82" width="224" height="82"/>
+    <rect x="354" y="82" width="224" height="82"/>
+    <rect x="684" y="82" width="224" height="82"/>
+    <path d="M 260 126 H 342" marker-end="url(#arrow)"/>
+    <path d="M 590 126 H 672" marker-end="url(#arrow)"/>
+    <path d="M 672 149 H 590" marker-end="url(#arrow)"/>
+    <path d="M 136 164 V 214 H 796 V 164"/>
+    <path d="M 466 164 V 234" marker-end="url(#arrow)"/>
+    <path d="M 466 268 V 286" marker-end="url(#arrow)"/>
+    <path d="M 466 322 V 339" marker-end="url(#arrow)"/>
+  </g>
+  <g fill="#24292f" font-family="ui-monospace, SFMono-Regular, Consolas, Liberation Mono, Microsoft YaHei, monospace" font-size="14">
+    <text x="466" y="24" text-anchor="middle">底层控制循环</text>
+    <text x="36" y="103">MuJoCo 仿真</text>
+    <text x="36" y="126">差速小车+两自由度臂</text>
+    <text x="36" y="149">网球 + 收纳箱</text>
+    <text x="301" y="103" text-anchor="middle">观测</text>
+    <text x="366" y="103">Brain (统一接口)</text>
+    <text x="366" y="126">scripted</text>
+    <text x="366" y="149">openai / anthropic</text>
+    <text x="631" y="103" text-anchor="middle">工具调用</text>
+    <text x="696" y="103">ToolLayer</text>
+    <text x="696" y="126">forward / back</text>
+    <text x="696" y="149">turn_left/right ...</text>
+    <text x="631" y="177" text-anchor="middle">工具反馈</text>
+    <text x="146" y="189">状态/图像</text>
+    <text x="476" y="189">决策</text>
+    <text x="806" y="189">执行结果</text>
+    <text x="466" y="254" text-anchor="middle">EpisodeRecorder (决策级 + 控制级 10 Hz)</text>
+    <text x="466" y="307" text-anchor="middle">data/episodes/ep_XXXX/</text>
+    <text x="466" y="364" text-anchor="middle">GUI 回放 / 视频导出 / (后续: LeRobot v3 -&gt; ACT)</text>
+  </g>
+</svg>

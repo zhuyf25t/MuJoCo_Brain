@@ -2,6 +2,139 @@
 
 基于 MuJoCo 的机器人智能体实验平台，支持可替换大脑、工具调用与仿真轨迹记录。
 
+## 先看当前架构
+
+当前重点是 `--brain langgraph`：**五个阶段管理流程，九个小模块负责判断，程序执行动作，经验库保存图片与动作的对应关系。** 每个模块独立配置 prompt、模型和实现。当前默认 `thinking: enabled`、`reasoning_effort: low`、`max_tokens: 8192`；模型继承项目 `.env`，最近一次运行使用 `deepseek-flash`。
+
+完整的 LangGraph 文件说明、每阶段输入输出和替换接口见 [模块 README](brains/langgraph/README.md)；人类提出的流程保存在 [langgraph.md](brains/langgraph.md)。下面旧版普通 LLM 的批量 tool calling 说明不能直接当作 LangGraph 的行为。
+
+```text
+run_collect.py 取一张车头图
+  └─ LangGraphBrain.decide()                 ← 一轮决策，不是一次完整抓放任务
+      ├─ 保存前图 → 实际指令 → 当前图
+      ├─ graph.py 选择五阶段之一
+      └─ stages.py 调用本阶段的小模块
+          ├─ find_ball/find_box：本轮只定位一次
+          ├─ learning.py：纯移动才分析经验，目标坐标复用定位结果
+          ├─ match_*：参考 reach，判断左右位置和远近
+          ├─ plan_motion：参考匹配结果及方向经验，选择动作与秒数
+          └─ execution.py：核验资料权限，返回指令列表
+  └─ ToolLayer → BaseDriver/ArmDriver → HAL → MuJoCo
+      └─ Recorder 保存每条动作的前后图和连续轨迹
+          └─ 下一轮取新图；结束后自动生成 review/index.html
+```
+
+外层 `brain.decide()` 是 Python 接口；内部 LLM 的 function calling 只有 `submit_result`，用于返回结构化判断。经验申请是这些判断的一种结果，由程序处理；机器人动作也由程序执行，因此不存在两个相同的机器人 tool list 嵌套互相调用。
+
+一轮可包含多个模块调用、资料申请和固定组合动作；目前移动规划每轮返回一个底盘动作，执行后看新图。抓取组合一次返回四条指令。网页左侧的一“轮”、一次 API 请求、一次工具动作、完整任务的一“集”是四个不同单位。
+
+视觉模型只收到当前/对比车头图、任务、自己的指令、必要经验与共享定位。仿真真值、俯视图、工具反馈用于记录与人类检查，不能作为 LangGraph 的视觉证据。`control/perception.py` 的标定测距也没有接入该 brain。
+
+### 五个阶段与判断模块
+
+| 阶段 | 调用与实际行为 | 转移条件 |
+| --- | --- | --- |
+| `origin` 起源 | 新任务先 stow；缺 reach 参考时伸臂取图，由 `analyze_reach` 分析入库，再收臂。 | 参考资料准备后进入 empty。 |
+| `empty` 未持球 | `find_ball` 定位；`match_grasp` 判断左右、远近；需要调整时调用 `plan_motion`。 | 可抓则执行张爪 → reach → 闭爪 → carry，进入 pending。 |
+| `pending` 待确认持球 | 保存 carry 图，保持闭爪伸到 reach；`check_held` 比较两张图。 | 是：carry 后进入 holding；否：stow 后返回 empty；不确定：有限次换姿态重看。 |
+| `holding` 已持球 | `find_box` 定位箱口；`match_drop` 判断投放条件；需要调整时调用 `plan_motion`。 | 可投放则 drop → 张爪 → observe，进入 final。 |
+| `final` 最终检查 | `check_drop` 检查释放后的新图。 | 是则 done；否或不确定则停止并保存原因。 |
+
+另一个共享模块 `analyze_motion` 在新一轮定位后分析上一段纯底盘移动，因此合计九个模块。一个阶段可以跨多轮，也可以在同一轮调用多个模块；执行一批动作后才取得下一轮模型观测。
+
+**目前阶段选择、状态更新和动作分支都是程序逻辑。** LangGraph 负责节点路由，`stages.py` 内的分支负责推进流程，模型只返回各模块的结构化判断。没有一个额外的“总决策模型”读取完整历史。
+
+### 当前进度（2026-10-02）
+
+| 项目 | 已有实现或最近验证结果 |
+| --- | --- |
+| 模块化闭环 | 五阶段、九模块、按需经验查询、动作权限、逐轮日志及网页 review 已接通。 |
+| 最近一次 low GUI | 35 决策轮、46 条动作；第 24 轮抓到球，第 26 轮视觉确认持球。第 33–35 轮无法判断释放位置而停止，未投放，整次任务未成功。 |
+| 失败后的短期记忆 | **尚未实现。** `check_held=no` 后回到 empty，失败说明没有传给后续抓取判断；第 17–22 轮出现未调整底盘就重复抓取。 |
+| 长移动同轮拆分 | **尚未实现。** 正式移动每轮一条、上限 2s；刚讨论的规划 4s → 同轮执行 2s + 2s 仍是方案。固定抓取/投放组合已经支持一轮多动作。 |
+| 投放依据 | 目前只给当前图、箱口定位和 reach 参考，尚无 drop 释放位置参考，也未实现先保持闭爪到 drop 观察、再决定释放的流程。 |
+| 视觉可靠性 | low 仍有定位错误及目标切换；本轮共享坐标已实现，可靠的跨帧目标跟踪尚未实现。 |
+
+任务状态、操作经验库和完整日志是三种不同数据：`TaskState` 管本任务进度；`ExperienceStore` 保存少量操作样本；日志供复盘，不会自动传给下一次模型。因此“有经验库和完整日志”不代表模型记得刚才抓取失败。字段与数据流见[任务状态与记忆](brains/langgraph/README.md#任务状态与记忆)。
+
+最近完整记录见[本机 Run Review](http://127.0.0.1:8770/?completed=1#17)（需本机报告服务运行）；保存文件为 [review/index.html](output/langgraph_gui/20261002-204647-reasoning-low-2/episodes/ep_0000/review/index.html)。实验成本、接口修复及历次结果见[验证记录](docs/langgraph-review-followup.md)。
+
+## 项目文件导航
+
+本表覆盖项目自己维护的文件；LangGraph 包逐文件列在其 [README](brains/langgraph/README.md#每个文件一句话)。虚拟环境、缓存、采集图片及第三方模型资源不作为业务代码逐项讲解。
+
+| 文件 | 一句话说明 |
+| --- | --- |
+| `run_collect.py` | 命令行入口，组装环境和 brain、逐轮执行、保存结果及自动生成复盘网页。 |
+| `config.py` | 读取运行配置及本地环境变量，集中定义模型、相机、场景和控制参数。 |
+| `.env.example` | 提供本地 API 和配置变量的填写示例，真实 `.env` 不应提交。 |
+| `hal.py` | 定义机器人与世界的硬件抽象接口，让控制层不依赖 MuJoCo。 |
+| `compose_model.py` | 将底盘和机械臂组合成可加载的 MuJoCo 模型。 |
+| `recorder.py` | 保存决策级记录、图像、控制轨迹和每集汇总信息。 |
+| `viz.py` | 管理相机渲染、MuJoCo GUI 及运行状态文字。 |
+| `playback.py` | 校验历史轨迹并恢复对应仿真状态，供 GUI 和视频回放共用。 |
+| `replay_gui.py` | 用交互窗口查看已经录制的轨迹，不重新调用决策模型。 |
+| `rerender.py` | 根据已录轨迹离线重新渲染不同相机画面。 |
+| `inspect_data.py` | 汇总采集数据并导出查看用的视频。 |
+| `termimg_test.py` | 检查终端是否能用 Kitty 协议显示图像。 |
+| `run` | Linux 环境的一键启动脚本，自举依赖、组合模型并开始采集。 |
+| `requirements.txt` | 声明基础仿真、图像、API 与测试依赖。 |
+| `requirements-langgraph.txt` | 声明模块化 LangGraph 的额外依赖。 |
+| `.gitignore` | 排除本地密钥、环境、缓存及大批量运行产物。 |
+| `control/__init__.py` | 声明控制包。 |
+| `control/drivers.py` | 将前后左右、预设臂姿态和关节微调变成底层控制过程。 |
+| `control/tools.py` | 定义可执行工具及参数，并将工具请求交给驱动。 |
+| `control/kinematics.py` | 提供两关节机械臂的正逆运动学计算。 |
+| `control/perception.py` | 提供颜色检测和标定地面投影，供规则策略等使用，当前 LangGraph 不使用其测距。 |
+| `sim/__init__.py` | 声明仿真包。 |
+| `sim/backend.py` | 实现 MuJoCo 版 HAL，并封装抓取吸附等仿真机制。 |
+| `sim/env.py` | 加载场景、重置随机环境、生成观测并独立评分。 |
+| `brains/__init__.py` | 导出普通 brain 接口与实现，LangGraph 在需要时单独加载。 |
+| `brains/base.py` | 定义所有 brain 共用的 `Brain` 与 `Decision` 接口。 |
+| `brains/scripted.py` | 实现规则控制基线，不调用大模型。 |
+| `brains/openai_compat.py` | 实现普通 OpenAI 兼容工具调用策略。 |
+| `brains/anthropic_api.py` | 实现普通 Anthropic 工具调用策略。 |
+| `brains/llm_common.py` | 提供 API 配置解析、图像编码等共用函数。 |
+| `brains/visual_context.py` | 构建普通 LLM 的视觉输入并过滤仿真私有信息。 |
+| `brains/arm_pose_test.py` | 实现 `--brain test` 的四姿态 GUI 演示。 |
+| `brains/langgraph.md` | 保存人类流程原文和对应的模块化架构设计。 |
+| `models/base_chassis.xml` | 定义小车底盘与相机等基础结构。 |
+| `models/reference_arm.xml` | 定义本项目使用的肩、肘和夹爪结构。 |
+| `models/mobile_manip.generated.xml` | 保存组合脚本生成的整机模型。 |
+| `models/scene_pickball.xml` | 定义抓球任务的场地、球与箱子。 |
+| `tests/test_control_pure.py` | 用假硬件验证不依赖 MuJoCo 的控制层行为。 |
+| `tests/test_pipeline.py` | 验证仿真、工具与采集管线。 |
+| `tests/test_lifecycle_playback.py` | 验证资源生命周期和历史轨迹恢复。 |
+| `tests/test_llm_settings.py` | 验证普通 LLM 的配置与调用约定。 |
+| `tests/test_visual_input_contract.py` | 验证模型输入过滤，防止混入私有状态。 |
+| `tests/test_modular_langgraph.py` | 验证五阶段、经验权限、共享定位、模块协议及 API 失败处理。 |
+| `tests/test_langgraph_report.py` | 验证网页轮次与原始调用、动作和图片对应正确。 |
+| `README.md` | 介绍整体架构、项目文件、运行与数据流。 |
+| `README-simple.md` | 提供常用命令与参数速查。 |
+| `CONTROL-review.md` | 保存控制层边界审计与历史限制说明。 |
+| `docs/images/control-loop.svg` | 展示底层控制闭环。 |
+| `docs/langgraph-gui-validation.md` | 保存早期 GUI 验证结果，不能当作最新成功证明。 |
+| `docs/langgraph-diagnosis-20261002.md` | 保存此前失败运行的定位与诊断证据。 |
+| `docs/langgraph-review-followup.md` | 记录本次改动范围、待验证问题及新 GUI 试跑结果。 |
+| `legacy/langgraph/README.md` | 说明旧代码和旧设计的归档边界。 |
+| `legacy/langgraph/brains/old_langgraph_brain.py` | 保留旧版 brain，不注册为 `--brain` 选项。 |
+| `legacy/langgraph/brains/langgraph_memory.py` | 保留旧版记忆实现。 |
+| `legacy/langgraph/brains/langgraph_policy.py` | 保留旧版策略实现。 |
+| `legacy/langgraph/brains/langgraph-design.md` | 保留旧版 LangGraph 设计。 |
+| `legacy/langgraph/brains/idea.md` | 保留早期构想。 |
+| `legacy/langgraph/brains/idea-design.md` | 保留已经被新流程替代的设计稿。 |
+| `legacy/langgraph/docs/langgraph-brain.md` | 保留旧 brain 与数据方案说明。 |
+| `legacy/langgraph/docs/langgraph-current-design.md` | 保留旧阶段的设计快照。 |
+| `legacy/langgraph/tests/langgraph_brain_tests.py` | 保留旧实现测试，当前测试入口不执行它。 |
+
+## 本轮优化及仍需验证的内容
+
+现在 `find_ball` 返回紧贴球体的圆（中心 + 半径），后续模块共用该定位；模型仍可能圈错，网页红圈是**模型输出的可视化**。匹配模块同时输出 `alignment` 和 `distance`，移动模块会收到相同目标、这两个判断、reach 参考及方向经验。没有启用程序几何抓取判定，也没有增加独立距离/剩余秒数估计器。
+
+**速度与距离要区分三件事**：理想固定物理速度下，路程与时间近似线性；图像中的球大小/位置随深度有透视变化，通常不是线性；真实车轮的起步、滑移、转向和负载还会影响实际运动。因而远球的像素变化率不能直接外推到很近的球；当前代码只记录局部图像变化，不宣称已经标定米/秒。项目自身的 `_ground_dist()` 也使用反正切和正切投影，说明像素行与地面距离不是简单一次函数。
+
+待评估的重点是：low 思考模式下的定位可靠性、reach 单张图能否估计可靠抓取区域、运动样本是否跟踪了同一静物、接近时是否推到了球，以及实际底盘速度的可重复性。抓取失败后的恢复记忆、长移动拆分与投放依据仍待实现和验证。详细问题与最新验证结果见 [本次记录](docs/langgraph-review-followup.md)。
+
 命令与参数速查、输出文件及覆盖规则见 [README-simple.md](README-simple.md)。
 
 项目关注大脑、工具与环境之间的闭环:大脑根据观测选择动作，控制层执行动作，
@@ -9,26 +142,7 @@ MuJoCo 推进物理模拟并生成新图像，记录器保存决策与轨迹。
 `scripted` 是用于验证流程的规则基线；`openai` 和 `anthropic` 是可替换的 LLM 接口。
 采集过程不训练模型；LeRobot 导出与 ACT 训练属于后续规划。
 
-```text
-                                          底层控制循环
-            ┌───────────────────────────────────────────────────────────────────────┐
-            v                                                                       │
-┌──────────────────────┐            ┌──────────────────────┐            ┌───────────┴──────────┐
-│ MuJoCo 仿真          │  观测      │ Brain (统一接口)     │  工具调用  │ ToolLayer            │
-│ 差速小车+两自由度臂  │ -------->  │ scripted             │ -------->  │ forward / back       │
-│ 网球 + 收纳箱        │            │ openai / anthropic   │ <--------  │ turn_left/right ...  │
-└───────────┬──────────┘            └───────────┬──────────┘  工具反馈  └───────────┬──────────┘
-            │ 状态/图像                         │ 决策                              │ 执行结果
-            └───────────────────────────────────┼───────────────────────────────────┘
-                                                v
-                             EpisodeRecorder (决策级 + 控制级 10 Hz)
-                                                │
-                                                v
-                                     data/episodes/ep_XXXX/
-                                                │
-                                                v
-                         GUI 回放 / 视频导出 / (后续: LeRobot v3 -> ACT)
-```
+![底层控制循环](docs/images/control-loop.svg)
 
 内部 Brain 接口仍有图像、状态与工具反馈；OpenAI/DeepSeek 在请求出口只保留当前车头图、
 任务、工具定义和最近的指令名称/参数。状态、程序测距及原始反馈不会发给 DeepSeek。
@@ -155,7 +269,7 @@ MUJOCO_GL=egl python -m pytest tests/ -v
 MuJoCo 会自动安装 Python 的 `glfw` 和 `PyOpenGL` 依赖。
 当前 OpenAI 兼容接口直接使用 `httpx`,Anthropic 接口使用 `anthropic` + `httpx2`;
 `brains/__init__.py` 会导入所有大脑,因此脚本模式也需要这些包。
-当前尚无 LangGraph、PyTorch 或 LeRobot 的实际代码依赖,训练工作流实现后再添加。
+LangGraph 是可选 brain，依赖单列在 `requirements-langgraph.txt`；目前尚无 PyTorch 或 LeRobot 训练依赖。
 
 ## 查看记录与 GUI 回放
 
@@ -295,6 +409,20 @@ python run_collect.py --brain openai      # OpenAI 兼容协议
 python run_collect.py --brain anthropic   # Anthropic 协议(实测走通)
 ```
 
+新 LangGraph 已按五阶段流程实现，入口为 `--brain langgraph`；旧实现仍保留在
+[legacy/langgraph](legacy/langgraph/README.md)。架构设计见 [brains/langgraph.md](brains/langgraph.md)，
+逐文件说明、模块模型/prompt 配置和重放方法见 [brains/langgraph/README.md](brains/langgraph/README.md)。
+
+```bash
+python -m pip install -r requirements-langgraph.txt
+python run_collect.py --brain langgraph --episodes 1 --gui --keep-open
+```
+
+默认沿用项目 `.env` 的兼容端点和模型；每个小任务的短 prompt、模型和 token 上限在
+`brains/langgraph/profiles.yaml` 独立配置。`--brain-profile` 可指定另一份配置，
+`--brain-memory` 可隔离实验经验库，`--max-decisions` 可限制一轮的决策次数。
+新 brain 只读取车头图和已发送指令；最终视觉检查与环境评分分别记录，两者均成功才计为有效完成。
+
 本机 Windows GUI 已验证可用，PowerShell 中可边运行 DeepSeek 边采集：
 
 ```powershell
@@ -356,29 +484,22 @@ data/episodes/ep_0042/
   imgs/              # 000123_front_cam.jpg / 000123_overhead.jpg + 决策快照
 ```
 
-**映射到 LeRobotDataset v3 / ACT**:
+**计划映射到 LeRobot / ACT（尚未实现转换器）**:
 
 | LeRobot 键 | 本数据 |
 |---|---|
 | `observation.state` (6维) | `arm_qpos`(2) + `finger`(1) + `base_pose`(3) |
-| `action` (6维) | 同维目标值(下一帧 state 的目标/ctrl 可直接回归绝对动作) |
+| `action` (候选 5维) | 两轮速度 + 肩/肘目标角 + 夹爪目标位移；按 actuator 顺序映射 `ctrl` |
 | `observation.images.front` | `imgs/*_front_cam.jpg`(车头相机,即策略输入) |
 | `observation.images.overhead` | `imgs/*_overhead.jpg`(仅回放/调试,非策略输入) |
 | `timestamp` / fps | `t` / 10 |
 | tasks 文本 | `meta.json.task` |
 
-参考实现(下一步迭代):
-```python
-from lerobot.common.datasets.v3 import LeRobotDataset
-ds = LeRobotDataset.create("openclaw_pickplace", fps=10, ...   # 需 lerobot>=0.4
-    features={"observation.state": 11维, "action": 11维, 两路图像})
-for ep in episodes:
-    for frame in trajectory:  # 只保留 success=True 的集
-        ds.add_frame({...})
-    ds.save_episode()
-ds.finalize()                 # 必须调用, 否则 parquet footer 损坏
-# 之后: lerobot 官方 ACT policy (ResNet18 + CVAE + 动作分块) 直接训练
-```
+当前每行在控制步执行后记录：行 t 的图像/状态已经受该行 `ctrl` 影响。
+训练下一步控制时，需将行 t 的观测与行 t+1 的 `ctrl` 对齐，并检查采样间隔、
+处理首尾缺失数据，在同一 episode 内构造动作块。不能直接将下一帧 state 当作控制标签。
+观测状态里的全局底盘位姿是否保留，需要按部署传感器决定。
+历史边界说明见 [归档的 ACT 数据说明](legacy/langgraph/docs/langgraph-brain.md#与-act-数据的关系)。
 
 **训练建议**(LeRobot 官方经验):相机固定 ✓、抓取行为一致 ✓(脚本策略)、
 ~50 条演示起步、ScriptedBrain 批量 200–1000 条很便宜(本机 headless 约 1 分钟/10 集)。
@@ -388,7 +509,7 @@ ds.finalize()                 # 必须调用, 否则 parquet footer 损坏
 - **阶段一(已交付)**:LLM/脚本 控制 + 全量记录。ScriptedBrain 批量产数据;
   LLM Brain 处理新任务/冷启动,失败数据同样有价值
 - **阶段二(下一步)**:success=True 的轨迹 → 导出 LeRobot v3 → `lerobot` ACT 训练 →
-  部署 `ACTBrain`(实现同一个 Brain 接口,策略推理代替 LLM)→ 新任务回退 LLM,循环
+  部署 ACT 策略（需要低层动作块执行接口，当前 Brain 返回高层工具指令）→ 新任务回退 LLM,循环
 
 ## 已知限制与下一步
 

@@ -180,7 +180,7 @@ def test_scripted_episode_end_to_end(tmp_path):
         env.close()
     ep = tmp_path / "ep_test"
     assert (ep / "meta.json").exists()
-    decisions = [json.loads(l) for l in (ep / "decisions.jsonl").read_text().splitlines()]
+    decisions = [json.loads(l) for l in (ep / "decisions.jsonl").read_text(encoding="utf-8").splitlines()]
     assert 3 <= len(decisions) <= 20
     # 视觉闭环管线应完成抓取 (投放端可靠性问题单独跟踪, 见 README)
     assert any(r["tool"] == "close_gripper" for r in decisions)

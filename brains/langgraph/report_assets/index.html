@@ -1,0 +1,12 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>LangGraph · 逐轮运行记录</title><link rel="stylesheet" href="review.css"></head>
+<body>
+<header><div><span class="eyebrow">LANGGRAPH / RUN REVIEW</span><h1>逐轮运行记录</h1><p id="task"></p></div><span id="run-state" class="badge"></span></header>
+<section id="overview" aria-label="运行概况"></section>
+<div class="layout"><aside><div class="nav-head"><strong>决策轮次</strong><label><input id="issues-only" type="checkbox">只看需复核</label></div><nav id="rounds" aria-label="选择决策轮"></nav></aside>
+<main id="detail" aria-live="polite"></main></div>
+<footer>此页只读取已保存记录，不调用模型、不执行机器人动作。叠加坐标来自模型输出，不是人工标注。工具反馈和俯视图只供人检查，不会回传给模型。</footer>
+<script src="data.js"></script><script src="review.js"></script>
+</body></html>

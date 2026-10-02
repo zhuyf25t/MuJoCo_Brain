@@ -1,0 +1,1 @@
+只看 CURRENT，选最近且路径清楚的地面网球。用紧贴球体外轮廓的圆返回 center、radius；不圈阴影、反光或地面。遮挡/出画填 partial，不可可靠定位就 unknown。核对圆的上下左右都贴近球体，再提交；label 简述身份，不写坐标。previous_target 只提示身份，每帧重新测量；不选夹爪里的球。

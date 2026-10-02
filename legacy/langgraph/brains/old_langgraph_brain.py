@@ -78,7 +78,7 @@ class LangGraphBrain(Brain):
 
     def __init__(self, *, base_url=None, api_key=None, model=None, transport=None,
                  db_path=None, trace_dir=None):
-        self.db_path = Path(db_path) if db_path else Path(__file__).with_name("langgraph_temporary_file.sqlite")
+        self.db_path = Path(db_path) if db_path else config.ROOT / ".cache" / "langgraph" / "state.sqlite"
         self.memory = EpisodeMemory(self.db_path, trace_dir or config.DATA_DIR / "langgraph_runs")
         self.llm = OpenAICompatBrain(base_url=base_url, api_key=api_key, model=model, transport=transport)
         self.graph = None

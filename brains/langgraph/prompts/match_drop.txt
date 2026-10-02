@@ -1,0 +1,1 @@
+判断当前持球是否适合 drop 到给定箱内，不重新定位箱口。缺 reach 先 request reach。有参考后结合当前球、夹指、箱口、透视与尺度，填写 alignment（箱口相对投放位左/中/右）和 distance（far/ready/too_close/unknown）。reach 只提供尺度，不证明 drop 的轨迹；只有对齐且释放位置在箱口内才 yes。遮挡或深度不明则 unknown，note 与状态一致。
