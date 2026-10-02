@@ -87,7 +87,7 @@ class SpatialMatch(Match):
 class Motion(Record):
     status: Literal["move", "unknown", "need_info"]
     direction: Direction | None = None
-    seconds: float | None = Field(default=None, ge=0.1, le=3)
+    seconds: float | None = Field(default=None, ge=0.1, description="Total planned duration; must not exceed input max_seconds")
     request: InfoRequest | None = None
     note: str = Field(default="", max_length=NOTE_MAX_CHARS)
 
@@ -162,6 +162,16 @@ class Frame(Record):
     height: int | None = Field(default=None, gt=0)
 
 
+class Recovery(Record):
+    """Task-local visual failure evidence, separate from motion calibration."""
+
+    kind: Literal["grasp_failed"] = "grasp_failed"
+    note: str = Field(max_length=NOTE_MAX_CHARS)
+    failed_frame_id: str
+    failures: int = Field(default=1, ge=1)
+    correction_commands: list[dict] = Field(default_factory=list)
+
+
 class CapabilityInput(Record):
     """Allowlisted context: only images, own commands and requested evidence."""
 
@@ -177,7 +187,9 @@ class CapabilityInput(Record):
     comparison: Frame | None = None
     commands: list[dict] = Field(default_factory=list)
     max_seconds: float = 0.6
+    max_command_seconds: float = 2.0
     info_feedback: str = ""
+    recovery: Recovery | None = None
 
     @classmethod
     def from_recorded(cls, value):
@@ -208,6 +220,7 @@ class TaskState:
     unknown_count: int = 0
     pose: str = "unknown"
     final_verdict: str | None = None
+    recovery: Recovery | None = None
 
 
 def direction_request(direction: Direction) -> InfoRequest:

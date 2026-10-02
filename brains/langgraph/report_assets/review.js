@@ -44,7 +44,7 @@ function moduleCard(call,index) {
   const figs=[];if(v.comparison)figs.push(picture(v.comparison,"BEFORE · 对比前图",v.comparison_target));
   const point=v.target || r.target;
   figs.push(picture(v.frame,v.comparison?"AFTER CURRENT · 本次判断图":"CURRENT · 本次判断图",point,call.capability==="analyze_reach"&&r.valid?r.region:null));body.append(grid(figs));
-  const fields={};for(const k of ["task","intent","target","previous_target","comparison_target","assessment","summary","commands","max_seconds","info_feedback"]){if(v[k]!==undefined&&v[k]!==null&&v[k]!==""&&!(Array.isArray(v[k])&&!v[k].length))fields[k]=v[k];}
+  const fields={};for(const k of ["task","intent","target","previous_target","comparison_target","assessment","recovery","summary","commands","max_seconds","max_command_seconds","info_feedback"]){if(v[k]!==undefined&&v[k]!==null&&v[k]!==""&&!(Array.isArray(v[k])&&!v[k].length))fields[k]=v[k];}
   body.append(details("输入的目标、任务、资料目录与动作限制",json(fields),true));
   for(const sample of v.evidence||[]){
     const b=el("div"),fs=sample.frames||[];

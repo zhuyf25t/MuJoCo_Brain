@@ -1,10 +1,31 @@
 """Scope one-use permissions and expand fixed macros into existing tools."""
 
+from decimal import Decimal
+
 from brains.base import Decision
 
 
 def command(tool, **args):
     return {"tool": tool, "args": args}
+
+
+def motion_batch(direction, seconds, max_command_seconds):
+    """Preserve the planned total without an invalid sub-0.1s remainder."""
+    total, limit = Decimal(str(seconds)), Decimal(str(max_command_seconds))
+    minimum = Decimal("0.1")
+    if not total.is_finite() or not limit.is_finite() or min(total, limit) < minimum:
+        raise ValueError("Invalid motion batch duration")
+    remaining, durations = total, []
+    while remaining > limit:
+        durations.append(limit)
+        remaining -= limit
+    if durations and remaining < minimum:
+        durations[-1] -= minimum - remaining
+        remaining = minimum
+    durations.append(remaining)
+    if any(duration < minimum for duration in durations):
+        raise ValueError("Duration cannot be split within command limits")
+    return [command(direction, seconds=float(duration)) for duration in durations]
 
 
 def scope(state, action):

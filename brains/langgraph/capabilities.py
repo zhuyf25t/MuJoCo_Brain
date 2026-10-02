@@ -7,6 +7,7 @@ import time
 
 import yaml
 
+import config
 from .backends import LLMBackend, polygon_match
 from .contracts import BallDetection, Detection, SpatialMatch, Motion, MotionReview, ReachAnalysis, Verdict
 from .image_context import COMMON_PROMPT, PROTOCOL_VERSION
@@ -27,7 +28,11 @@ def load_profile(path=None):
     for key in ("max_decisions", "max_unknown", "max_info_requests"):
         if not isinstance(profile[key], int) or profile[key] < 1:
             raise ValueError(f"Invalid profile setting: {key}")
-    if not 0.1 <= profile["probe_seconds"] <= profile["max_motion_seconds"] <= 3:
+    profile.setdefault("max_plan_seconds", profile["max_motion_seconds"])
+    profile.setdefault("max_recovery_seconds", min(0.6, profile["max_motion_seconds"]))
+    if not (0.1 <= profile["probe_seconds"] <= profile["max_motion_seconds"] <= config.PRIM_MAX_S
+            and profile["max_motion_seconds"] <= profile["max_plan_seconds"] <= 30
+            and profile["probe_seconds"] <= profile["max_recovery_seconds"] <= profile["max_motion_seconds"]):
         raise ValueError("Invalid motion durations")
     for name, override in profile["capabilities"].items():
         spec = {**profile["defaults"], **override}

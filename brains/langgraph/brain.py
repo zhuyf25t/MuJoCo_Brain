@@ -75,6 +75,14 @@ class LangGraphBrain(Brain):
                       and self.state.target_frame_id == previous.id else None}
         self.state.last_transition = transition
         self.log.append("transition", **transition)
+        recovery = self.state.recovery
+        if recovery and commands and all(c["tool"] in (
+                "forward", "back", "turn_left", "turn_right") for c in commands):
+            # Only commands acknowledged on a NEW frame unlock a retry. Stow,
+            # observe, or merely issuing a plan cannot count as a correction.
+            self.state.recovery = recovery.model_copy(update={"correction_commands": commands})
+            self.log.append("recovery_updated", frame_id=current.id,
+                            recovery=self.state.recovery.model_dump())
         # Learning waits for this frame's one fresh detection in Stages.locate().
 
     def decide(self, obs, task_text, tool_schemas, history):

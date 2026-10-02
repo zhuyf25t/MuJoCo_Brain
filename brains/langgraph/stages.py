@@ -1,7 +1,7 @@
 """Five small task stages; capability results never control actuators directly."""
 
-from .contracts import CapabilityInput, Frame, InfoRequest, TargetIdentity, direction_request
-from .execution import authorize, command, drop, grasp, issue
+from .contracts import CapabilityInput, Frame, InfoRequest, Recovery, TargetIdentity, direction_request
+from .execution import authorize, command, drop, grasp, issue, motion_batch
 from .learning import learn_motion
 
 
@@ -26,8 +26,9 @@ class Stages:
         self.task = ""
         self.log = None
 
-    def context(self, state, **kwargs):
-        return CapabilityInput(frame=state.frame, summary=self.memory.directory(), **kwargs)
+    def context(self, state, *, include_recovery=False, **kwargs):
+        return CapabilityInput(frame=state.frame, summary=self.memory.directory(),
+                               recovery=state.recovery if include_recovery else None, **kwargs)
 
     def fixed(self, state, commands, note):
         return issue(state, commands, note, fixed=True)
@@ -106,22 +107,31 @@ class Stages:
         raise RuntimeError("资料申请次数超限")
 
     def move(self, state, intent, note=""):
+        recovering = state.recovery is not None and not state.recovery.correction_commands
+        long_forward = (not recovering and state.target is not None and state.target.path == "clear"
+                        and state.assessment is not None and state.assessment.alignment == "aligned"
+                        and state.assessment.distance == "far" and intent.startswith("approach_"))
+        limit = (self.profile["max_recovery_seconds"] if recovering else
+                 self.profile["max_plan_seconds"] if long_forward else self.profile["max_motion_seconds"])
         value = self.context(state, target=state.target, intent=intent,
-                             assessment=state.assessment,
-                             max_seconds=self.profile["max_motion_seconds"])
+                             assessment=state.assessment, include_recovery=True,
+                             max_seconds=limit, max_command_seconds=self.profile["max_motion_seconds"])
         result = self.resolve(state, "plan_motion", value, {"translation", "rotation"})
         if result.status == "unknown":
             return self.unknown(state, result.note)
         if intent == "search_right" and result.direction != "turn_right":
             raise RuntimeError("Search may only turn right")
-        if result.seconds > self.profile["max_motion_seconds"]:
-            raise RuntimeError("Motion exceeds configured small-step limit")
+        if result.seconds > limit:
+            raise RuntimeError("Motion exceeds configured planning limit")
+        if result.seconds > self.profile["max_motion_seconds"] and not (
+                long_forward and result.direction == "forward"):
+            raise RuntimeError("Long motion requires an aligned, far target and clear forward path")
         if result.direction == "forward" and (state.target is None or state.target.path != "clear"):
             raise RuntimeError("Forward approach requires a visible clear path")
         required = direction_request(result.direction)
         authorize(state, result.direction, [required])
         state.unknown_count = 0
-        return issue(state, [command(result.direction, seconds=result.seconds)],
+        return issue(state, motion_batch(result.direction, result.seconds, self.profile["max_motion_seconds"]),
                      note or result.note, action=result.direction)
 
     def probe(self, state, request):
@@ -175,10 +185,14 @@ class Stages:
         if state.target.path == "blocked":
             state.target = None
             return self.move(state, "search_right", "目标路径受阻，继续搜索")
-        match = self.resolve(state, "match_grasp", self.context(state, target=state.target), {"reach"})
+        match = self.resolve(state, "match_grasp", self.context(
+            state, target=state.target, include_recovery=True), {"reach"})
         state.assessment = match
         if match.status == "unknown":
             return self.unknown(state, match.note)
+        if state.recovery and not state.recovery.correction_commands:
+            return self.move(state, "recover_grasp: 上次视觉确认抓空，尚未调整底盘；"
+                             "根据当前图和失败说明选择有依据的小步修正，依据不足返回 unknown")
         if match.status == "no":
             return self.move(state, "approach_ball: " + match.note)
         authorize(state, "grasp", [InfoRequest(kind="reach")])
@@ -200,8 +214,15 @@ class Stages:
             state.phase, state.step = "holding", "search"
             state.target = None
             state.unknown_count = 0
+            state.recovery = None
+            self.log.append("recovery_cleared", frame_id=state.frame.id, reason="held_confirmed")
             return self.fixed(state, [command("arm_pose", pose="carry")], "视觉确认持球，回到携带姿态")
         if verdict.status == "no":
+            state.recovery = Recovery(note=verdict.note or "视觉检查未持球；失败原因尚不明确",
+                                      failed_frame_id=state.frame.id,
+                                      failures=state.recovery.failures + 1 if state.recovery else 1)
+            self.log.append("recovery_updated", frame_id=state.frame.id,
+                            recovery=state.recovery.model_dump())
             state.phase, state.step = "empty", "search"
             state.unknown_count = 0
             return self.fixed(state, [command("arm_pose", pose="stow")], "视觉确认未持球，收臂后继续寻球")

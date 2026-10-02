@@ -5,6 +5,8 @@ max_unknown: 3
 max_info_requests: 4
 probe_seconds: 0.2
 max_motion_seconds: 2.0
+max_plan_seconds: 4.0 # Total for an aligned, far target with a clear forward path.
+max_recovery_seconds: 0.6 # Small correction after visually confirmed empty grasp.
 defaults:
   backend: llm
   model: null

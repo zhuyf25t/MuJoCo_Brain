@@ -15,7 +15,7 @@ from brains.langgraph.contracts import (
     BallDetection, CapabilityInput, Frame, InfoRequest, Match, SpatialMatch, MotionAnalysis, MotionReview, ReachAnalysis,
     TaskState, Target, direction_request,
 )
-from brains.langgraph.execution import authorize, command, issue
+from brains.langgraph.execution import authorize, command, issue, motion_batch
 from brains.langgraph.memory import ExperienceStore, RunLog
 from brains.langgraph.image_context import COMMON_PROMPT, image_content
 from brains.langgraph.stages import FinalCheckError
@@ -154,7 +154,119 @@ def test_known_reference_and_recent_motion_do_not_need_extra_model_requests(runn
     assert any(s["direction"] == "forward" for s in plan_input.evidence)
     assert any(s["kind"] == "reach" for s in plan_input.evidence)
     assert plan_input.assessment.distance == "far"
-    assert plan_input.max_seconds == 2.0
+    assert plan_input.max_seconds == 4.0
+
+
+def test_failed_grasp_survives_stow_and_requires_acknowledged_correction(runner):
+    runner.initialize()
+    runner.step()  # Grasp.
+    runner.step()  # Closed reach to check.
+    runner.brain.capabilities.overrides["check_held"] = lambda v: {
+        "status": "no", "note": "球仍在地面，两指空夹；原因不能确定"}
+    assert runner.step() == [("arm_pose", {"pose": "stow"})]
+    failure = runner.brain.state.recovery
+    assert failure.note == "球仍在地面，两指空夹；原因不能确定"
+    assert failure.failed_frame_id == runner.brain.state.frame.id
+    seen = []
+    def recover(value):
+        seen.append(value)
+        return {"status": "need_info", "request": {"kind": "translation", "direction": "back"}}
+    runner.brain.capabilities.overrides["plan_motion"] = recover
+    # Even a fresh match=yes must not trigger the identical grasp again.
+    assert runner.step() == [("back", {"seconds": .2})]
+    assert seen[0].recovery == failure and seen[0].max_seconds == .6
+    assert seen[0].intent.startswith("recover_grasp:")
+    assert not runner.brain.state.recovery.correction_commands  # Issuing is not execution.
+    matches = [v for n, v in runner.scenario.calls if n == "match_grasp"]
+    assert matches[-1].recovery == failure
+    assert all(v.recovery is None for n, v in runner.scenario.calls if n == "find_ball")
+    assert runner.step()[0][0] == "open_gripper"  # New frame acknowledges actual back.
+    corrected = runner.brain.state.recovery
+    assert corrected.note == failure.note
+    assert corrected.correction_commands == [command("back", seconds=.2)]
+    runner.brain.capabilities.overrides["check_held"] = lambda v: {"status": "yes"}
+    runner.step()
+    runner.step()
+    assert runner.brain.state.phase == "holding" and runner.brain.state.recovery is None
+    sent = json.dumps([v.model_dump() for _, v in runner.scenario.calls] + [v.model_dump() for v in seen])
+    assert "PRIVATE_" not in sent
+
+
+def test_uncertain_recovery_does_not_repeat_grasp_or_forget_failure(runner):
+    runner.scenario.held = "no"
+    runner.initialize()
+    runner.step()
+    runner.step()
+    runner.step()
+    runner.brain.capabilities.overrides["plan_motion"] = lambda v: {
+        "status": "unknown", "note": "无法判断应怎样修正"}
+    for _ in range(2):
+        assert runner.step() == [("observe", {})]
+        assert runner.brain.state.recovery.failures == 1
+        assert not runner.brain.state.recovery.correction_commands
+    with pytest.raises(RuntimeError, match="连续无法判定"):
+        runner.step()
+
+
+def test_new_failure_resets_correction_and_task_reset_clears_recovery(runner):
+    runner.scenario.held = "no"
+    runner.initialize()
+    for _ in range(3):
+        runner.step()
+    for _ in range(4):  # Recovery probe, retry, closed reach, failed verification.
+        runner.step()
+    assert runner.brain.state.recovery.failures == 2
+    assert not runner.brain.state.recovery.correction_commands
+    runner.brain.reset()
+    assert runner.brain.state.recovery is None
+
+
+def test_long_forward_is_one_batch_and_learned_with_full_duration(runner):
+    runner.scenario.match = "no"
+    runner.initialize()
+    runner.step()  # Missing experience: still only one 0.2s probe.
+    calls = []
+    def plan(value):
+        calls.append(value)
+        return {"status": "move", "direction": "forward", "seconds": 4.0}
+    runner.brain.capabilities.overrides["plan_motion"] = plan
+    assert runner.step() == [("forward", {"seconds": 2.0}), ("forward", {"seconds": 2.0})]
+    assert len(calls) == 1  # No model call between the two commands.
+    runner.step()
+    sample = runner.brain.memory.query(direction_request("forward"))[0]
+    assert sample["commands"] == [command("forward", seconds=2.0)] * 2
+    assert sample["image_rate"]["duration_seconds"] == 4.0
+    assert sample["image_rate"]["normalized_dx_per_second"] == pytest.approx(-.025)
+
+
+@pytest.mark.parametrize("distance,direction,seconds", [
+    ("ready", "forward", 4.0), ("far", "forward", 4.1), ("far", "back", 4.0),
+])
+def test_invalid_long_plans_do_not_issue_any_commands(runner, distance, direction, seconds):
+    runner.scenario.match = "no"
+    runner.initialize()
+    runner.step()
+    runner.brain.capabilities.overrides["match_grasp"] = lambda v: {
+        "status": "no", "alignment": "aligned", "distance": distance}
+    runner.brain.capabilities.overrides["plan_motion"] = lambda v: {
+        "status": "move", "direction": direction, "seconds": seconds}
+    if direction == "back":
+        # Supply direction evidence so the invalid long back reaches plan validation.
+        runner.brain.memory.add(direction_request("back"), [runner.brain.state.frame] * 2,
+                               [command("back", seconds=.2)], MotionAnalysis(
+                                   valid=True, landmark="corner", before={"x": .6, "y": .5},
+                                   after={"x": .5, "y": .5}, note="shift"))
+    with pytest.raises(RuntimeError, match="planning limit|Long motion"):
+        runner.step()
+    assert not runner.brain.state.pending_commands
+
+
+@pytest.mark.parametrize("total,expected", [(4, [2, 2]), (4.3, [2, 2, .3]), (2.05, [1.95, .1])])
+def test_motion_batch_preserves_total_and_valid_remainders(total, expected):
+    batch = motion_batch("forward", total, 2)
+    durations = [c["args"]["seconds"] for c in batch]
+    assert durations == expected
+    assert sum(durations) == pytest.approx(total)
 
 
 def test_duplicate_request_gets_feedback_without_aborting_or_duplicating_samples(runner):
