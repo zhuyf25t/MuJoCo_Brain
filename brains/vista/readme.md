@@ -1,6 +1,6 @@
 # VISTA Brain：用基础 LangGraph 串起视觉、动作和记忆
 
-设计日期：2026-10-08。**这是待实现的设计稿，目前这个文件夹保留本 README 和原论文 `VISTA-original.pdf`。** 原来的译本和官方源码等研究资料保留在本地 `../VISTA-docs/`。本文中的代码是说明接口与控制流的示意，尚不能直接运行 `--brain vista`。
+实现日期：2026-10-08。**本目录已实现第一版 VISTA Brain，并接入 `run_collect.py --brain=vista`。** 原论文副本保留为 `VISTA-original.pdf`；原来的译本和官方源码等研究资料保留在本地 `../VISTA-docs/`。下文保留架构和工具约定，代码片段用于解释流程，完整实现以同目录的 Python 文件为准。
 
 第一版的目标很具体：模型收到车头图，可以一次请求多个工具来查旧图、裁图、读像素、读写笔记；用一次 `play` 提交一批 MuJoCo 动作；外层按顺序执行整批，再返回最终图片和各子动作结果；模型沿用原来的消息历史继续。先证明这条链能闭合。暂不做上下文压缩、语义图片搜索、子图或多个模型分工。多个工具请求先顺序执行、统一反馈；不要求引入并发编程。
 
@@ -8,9 +8,34 @@
 
 阅读顺序：先看文件布局和整张图，再看状态如何延续，最后逐个看工具协议。第 8 节用同一段抓球经历把它们串起来。
 
+运行前安装可选依赖，在项目 `.env` 或进程环境中配置 `max_model_calls`，以及支持**图片输入和工具调用**的 OpenAI 兼容 Chat Completions 端点、模型和密钥。密钥配置沿用 `LLM_*` / `OPENAI_*` 名称，示例见项目 `.env.example`；不要把凭据写进指南、草稿或代码。
+
+```bash
+python -m pip install -r requirements-langgraph.txt
+python run_collect.py --brain=vista --episodes 1 --gui --max-decisions 8
+```
+
+当前电脑已经准备好的 Windows 环境也可以直接运行：
+
+```powershell
+.\.venv-gui\Scripts\python.exe run_collect.py --brain=vista --episodes 1 --gui --max-decisions 8
+```
+
+`--max-decisions` 限制外层决策轮数；`.env` 中的 `max_model_calls` 限制每轮内部的模型请求次数，两者独立。`--brain-memory` 可指定图片与笔记根目录，默认 `output/vista/`；`--out` 仍指定通用采集记录目录。两个根目录分别分配 episode 编号，不要求编号相同，VISTA 的 `episode_start` 日志记录对应采集目录。
+
+第一版使用完整 JSON 回复，要求 `stream=false`。每次模型调用只发送一次 POST，不自动重试、不探测其他 URL。`OPENAI_BASE_URL` 应包含服务所需的完整 API 前缀（例如 `/v1`），也可直接配置到 `/chat/completions`。保留服务要求回传的 reasoning 字段和原始 tool_calls；不自动切换到其他模型或 API 协议。工具协议参考 [Chat Completions 接口](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create)。
+
+本地验证使用模拟模型和真实 MuJoCo 控制器，不会调用付费模型：
+
+```bash
+python -m pytest tests/test_vista.py -q
+```
+
+这里验证了消息、工具、动作与图片的闭环；真实模型的视觉判断和抓球成功率仍需另行实测。
+
 ## 1. 文件怎么摆，谁负责什么
 
-下面是**计划中的布局**。除这个 `readme.md`、原论文和已经存在的项目文件外，其余新文件在后续实现时创建。
+下面是**已实现的布局**。`output/vista/` 内的图片、笔记和日志在运行时创建。**`*` 表示包含可复用的 VISTA 框架机制，不表示整个文件已经与 MuJoCo 解耦；星号不是文件名的一部分。**
 
 ```text
 mujoco/
@@ -28,17 +53,17 @@ mujoco/
 │       ├── readme.md               本设计稿
 │       ├── VISTA-original.pdf      原论文的本地副本
 │       ├── __init__.py             导出 VistaBrain
-│       ├── brain.py                接收新观察，保存 state，交出动作，接回结果
-│       ├── graph.py                两个节点及其条件边
-│       ├── state.py                两个 State 字段、动作批次和回执的格式约定
-│       ├── model.py                模型接口、工具定义绑定、图片消息的转换
-│       ├── tools.py                九个工具的定义、参数检查和分发
-│       ├── storage.py              原图索引、图片裁剪、笔记和日志读写
-│       ├── settings.py             读取 max_model_calls，管理尺寸和字符数等配置
+│       ├── * brain.py              接收新观察，保存 state，交出动作，接回结果
+│       ├── * graph.py              两个节点及其条件边
+│       ├── * state.py              两个 State 字段、动作批次和回执的格式约定
+│       ├── * model.py              模型接口、工具定义绑定、图片消息的转换
+│       ├── * tools.py              九个工具的定义、参数检查和分发
+│       ├── * storage.py            原图索引、PNG、笔记和日志读写
+│       ├── * settings.py           读取 max_model_calls，管理尺寸和字符数等配置
 │       └── prompts/
-│           └── system.txt          稳定的任务行为说明
+│           └── system.txt          当前 MuJoCo 任务、车头相机和工具使用说明
 ├── tests/
-│   └── test_vista.py               后续实现时验证消息续接和工具边界
+│   └── test_vista.py               消息、工具边界、故障退出及真实 MuJoCo 验证
 └── output/
     └── vista/
         ├── guide.md               同一环境设定下，可跨 episode 保留的指南
@@ -51,8 +76,21 @@ mujoco/
             ├── frame_index.jsonl  图片编号 → 相对文件路径、尺寸、来源批次
             ├── actions.jsonl      每次 play 一条：整批请求、子动作结果、预期、前后帧
             ├── calls.jsonl        所有工具的请求与结果，包括失败的检查
-            └── messages.jsonl     消息轨迹，供人检查；不是第一版的自动恢复入口
+            ├── messages.jsonl     消息轨迹，供人检查；不是第一版的自动恢复入口
+            └── outcome.json       本集结局与外层评分，仅供人检查，不作为模型输入
 ```
+
+这里的“可复用”是指这份实现换一个仿真或游戏时可以沿用的机制，不代表原论文规定必须有这些文件。当前版本仍是 MuJoCo 项目中的实现，尚不是拿到任何环境就能直接运行的通用库。
+
+| 文件 | 可以复用什么 | 换环境时需要检查或替换什么 |
+| --- | --- | --- |
+| `graph.py`、`state.py` | model/tools 循环、消息累计、调用预算、工具请求与结果配对 | 新环境是否继续采用 play 提交批次、外层回传结果的约定 |
+| `model.py` | 文本/图片/工具消息转换和模型请求 | 当前仅适配 OpenAI 兼容 Chat Completions；换 API 协议需要另写适配 |
+| `brain.py` | 同一 episode 的上下文延续、动作交接和结果接回 | 本项目的 Brain/Decision 接口、车头观察格式和结束判定 |
+| `tools.py` | 查图、读像素、history、笔记读写及参数检查 | `action_schemas()` 中固定的十个 MuJoCo 动作、姿态、单位和范围 |
+| `storage.py`、`settings.py` | PNG 编号与归档、笔记作用域、JSONL 日志、预算和长度配置 | `images.front` 观察入口、车头相关初始笔记，以及项目 config 和默认路径 |
+
+`prompts/system.txt`、外层 `run_collect.py` 和 `control/tools.py` 当前承担具体任务和环境的适配，因此没有把它们整体标为通用。提示词中的查图、记笔记、提交批次等协议可以沿用，但车头相机、抓球任务和机器人动作说明需要随环境调整。迁移时主要替换**观察入口、动作定义与执行器、任务提示词**，通常不必重写 LangGraph 的两个节点和转移边。
 
 这里先把图片和笔记的普通文件操作集中在 `storage.py`，不必为每一项功能再建一层框架。等它真的变大时再拆。裁图是由原图生成的派生图片，可以直接进入消息，也可以放临时缓存；**不把裁图冒充新的环境帧**。
 
@@ -214,7 +252,7 @@ self.state = self.graph.invoke(
 self.state["messages"] = add_messages(self.state["messages"], result_messages)
 ```
 
-`check_current_round_results` 是拟实现的简单协议检查，不是 LangGraph 内置函数，也不是测试。只看最近一条 AIMessage 以及它后面的结果，检查各 ID 有且只有一份匹配结果；初始时没有模型请求则无需检查。不扫描每轮以前的整段历史，不维护全局未完成请求列表。
+`check_current_round_results` 是 `state.py` 中的普通协议检查函数，不是 LangGraph 内置函数，也不是测试。只看最近一条 AIMessage 以及它后面的结果，检查各 ID 有且只有一份匹配结果；初始时没有模型请求则无需检查。不扫描每轮以前的整段历史，不维护全局未完成请求列表。
 
 外层回执也与当前这条经过校验的请求配对；两次 decide 不并发。任何错配都抛异常，不猜测、不继续请求模型。保留当前轮 ID 检查，是为了避免把甲工具的结果回复给乙工具；不需要名为 unresolved_calls 的全历史扫描函数。
 
@@ -243,9 +281,9 @@ State 不必装下文件本体、连接和整个仿真世界。节点通过普�
 max_model_calls=12
 ```
 
-12 只是配置示例，不是代码里固定的上限。拟实现的 settings 在启动时先读取进程环境变量 `max_model_calls`；若未设置，再从项目现有 `.env` 文件的同名项读取。项目目前使用 dotenv_values 读取文件，不会自动把文件中的键导出到进程环境，因此不能只调用 os.getenv 就认为读到了 `.env`。
+12 只是配置示例，不是代码里固定的上限。settings 在启动时先读取进程环境变量 `max_model_calls`；若未设置，再从项目现有 `.env` 文件的同名项读取。这里使用 dotenv_values 读取文件，不会自动把文件中的键导出到进程环境，因此不能只调用 os.getenv 就认为读到了 `.env`。VISTA 模型连接配置也采用进程环境优先、项目 `.env` 其次的顺序。
 
-该项必填，去掉首尾空白后必须是正整数字符串。缺失、空值、0、负数或非整数时，在任何 API/动作执行之前抛出 `RuntimeError("max_model_calls 必须配置为正整数，例如 12")`。最高优先级来源存在但无效时直接报错，不悄悄改用另一个来源。用户自行填写配置，本次文档修改不改凭据文件。
+该项必填，去掉首尾空白后必须是正整数字符串。缺失、空值、0、负数或非整数时，在任何 API/动作执行之前抛出 `RuntimeError("max_model_calls 必须配置为正整数，例如 12")`。最高优先级来源存在但无效时直接报错，不悄悄改用另一个来源。用户自行填写配置；实现只更新 `.env.example`，不改凭据文件。
 
 每次 decide 开始将 model_calls 归零；一次 decide 内可能有很多次查询和模型请求。model 节点在每次 API 请求前检查：
 
@@ -286,7 +324,7 @@ if __name__ == "__main__":
     raise SystemExit(exit_code)
 ```
 
-这段是拟接入的入口示意，不是目前已经实现。资源通过 with/finally 释放；能保存的实际执行记录先保存，再向外抛出，保存失败也不能被当成正常完成。终止后不发新 API、不执行剩余子动作、不进入下一个 episode、不进入 keep-open 等待，也不自动重试。
+上面是入口的简化示意，实际由 `run_collect.cli()` 捕获并返回退出码 1。资源通过 with/finally 释放；能保存的实际执行记录先保存，再向外抛出，保存失败也不能被当成正常完成。终止后不发新 API、不执行剩余子动作、不进入下一个 episode、不进入 keep-open 等待，也不自动重试。
 
 普通模型参数错误仍属于可修正的工具返回，例如裁剪越界：返回一条 ToolMessage，让模型自己决定下一步。它不需要 raise。区分的是“请求可以改正”和“宿主已经无法可靠继续”，而不是把所有 ok=false 都当成崩溃。正常 finish 走 END，外层处理任务结束及评分，不抛异常。
 
@@ -305,7 +343,7 @@ tools 参数：九个工具的结构化名称、描述、参数 Schema
 
 三类说明分开提供：system.txt 写稳定的行为规则；本次任务目标来自初始 HumanMessage 的 task_text；工具名、作用、参数类型/单位/范围写在 tools.py 的工具描述和 Schema 中，经 model.py 的 API tools 参数发送。不能只给 action 名称枚举，让模型猜各动作的含义。
 
-尤其是 play 的 actions，每种子动作都必须有说明：forward/back 是前进/后退，turn_left/right 是原地转向，四个 arm_pose 预设分别做什么，以及 seconds、delta 的含义和约束。说明和 Schema 应来自同一份动作定义，避免 system 中另一份清单过期。当前只有本文，实际提示文件和模型适配器尚未实现，不能声称这些说明已实际发给模型。
+尤其是 play 的 actions，每种子动作都有说明：forward/back 是前进/后退，turn_left/right 是原地转向，四个 arm_pose 预设分别做什么，以及 seconds、delta 的含义和约束。`tools.action_schemas()` 从外层提供的控制定义生成 Schema，并补充严格的参数范围、姿态枚举和视觉反馈说明。`prompts/system.txt` 说明稳定规则，`model.ChatModel` 将这些工具定义随每次请求发出。
 
 稳定 system 文本可以保存在 `VistaBrain` 中，每次请求临时拼在 `state["messages"]` 前面，不必重复追加进历史。工具清单也是模型接口的独立参数，不能只把 Python 函数名写在用户文本里就期待它自动调用。
 
@@ -354,7 +392,7 @@ ToolMessage：tool_call_id=c3，第二张图的采样结果
 
 `frame_id="f000001"` 只是检索编号。模型要看图，`model.py` 还必须读取图片字节并转换成目标 API 支持的图像内容块。
 
-逻辑上的工具结果可以同时包含文字和图像。具体发送方式由模型适配器负责：支持工具图片的接口可直接放入工具结果；只支持 user 图片的接口，先发本条 AIMessage 对应的**全部文字 ToolMessage**，再发带调用 ID 和图片身份的图片 HumanMessage。不要把 user 图片插进尚未配齐的多个工具结果中。检查工具的图片标明“环境未变化”；play 的图片标明“该批次结束后的观察”。两种方式都必须保留调用与图片的对应关系，不能只把本地路径当文字发送。
+逻辑上的工具结果可以同时包含文字和图像。本版统一采用便于 OpenAI 兼容端点接收的方式：先发本条 AIMessage 对应的**全部文字 ToolMessage**，再发带调用 ID 和图片身份的图片 HumanMessage。不会把 user 图片插进尚未配齐的多个工具结果中。检查工具的图片标明“环境未变化”；play 的图片标明“该批次结束后的观察”。图片以真实 PNG 内容块发送，不是只给模型一个本地路径。
 
 第一版需要选一个实际支持**图像输入和工具调用**的模型及端点。现有 OpenAI 兼容接口形式可以复用，但“兼容接口”并不证明任何模型都支持这些能力；接入时必须用实际端点验证。本文不默认现有 `.env` 中的模型自动满足全部条件。
 
@@ -745,7 +783,7 @@ finish 校验通过后 tools 返回 `{}`，条件边正常到 END。外层从当
 
 这是对第一版采集范围的明确限制：**批内子动作之间、子动作执行过程中的中间画面暂不进入 VISTA 图片库**。一次三动作 play 默认仍只有一张最终图。原版可以归档环境一次动作返回的多帧；MuJoCo 以后也可以采集批内边界或 tick 帧并附上子动作编号，但现在不把录像目录里碰巧存在的画面当成模型已经能查询的图片。
 
-现有录像可以继续保存其他视角，但 VISTA 的 `inspect`、`history` 不暴露俯视图、侧视图或真值记录。`--no-images` 若用于未来 VISTA 运行，应只关闭通用录像图片，不能关闭其必需的原图档案；这一点需要在接入 CLI 时明确处理。
+现有录像可以继续保存其他视角，但 VISTA 的 `inspect`、`history` 不暴露俯视图、侧视图或真值记录。`--no-images` 只关闭通用录像图片，VISTA 仍会保存必需的初始图和每批最终车头 PNG。
 
 ### 7.2 裁剪图与原图坐标的关系
 
@@ -776,11 +814,11 @@ original_y = y + v * height / rendered_height
 
 ### 7.4 与当前采集器的衔接：正常交接与异常退出分开
 
-当前 Brain.decide 已返回 list[Decision]，采集器也顺序执行。新增 VISTA 时沿用这一接口，将整个列表对应到一次 play。当前传入 brain 的 history 是逐动作的原始记录，不等于本设计的按批次 history 工具；公开历史由 VISTA 的批次日志提供。
+Brain.decide 返回 list[Decision]，采集器顺序执行，将整个列表对应到一次 play。传入 brain 的 history 是逐动作的原始记录，不等于按批次 history 工具；VISTA 不把这份含底层结果文字的 history 发给模型，公开历史由自己的批次日志提供。
 
-必须调整的异常边界：当前 run_collect.py 捕获部分 brain 异常后仅 break 当前 episode，随后主循环仍可能运行下一集。**VISTA 路径不能沿用这个吞掉异常的分支。** 记录完当前集的错误后必须重新 raise，让异常离开全部 episode 循环，由第 3.5 节的最外层入口打印一次、以退出码 1 终止整个程序。其他 brain 的行为不属于本次设计改动。
+`run_collect._run_vista_rounds()` 单独处理 VISTA 批次。它不走其他 brain 的“捕获决策异常后仅结束当前集”的路径：记录完当前集的错误后继续 raise，让异常离开全部 episode 循环，由第 3.5 节的最外层入口打印、以退出码 1 终止整个程序。其他 brain 的决策流程保留。
 
-计划中的正常流程：
+已实现的正常流程：
 
 1. 启动时读取并校验 max_model_calls，创建 VistaBrain 和模型接口；每集 begin_episode 固定目录，初始化两个 State 字段、笔记和空日志。初始 decide 归档初始图，后续不重复追加同一观察。
 2. decide 运行图。只有 tools 验证成功的 play/finish 会正常到 END；外层读取返回状态末尾的这条 AIMessage。play 转成一组 Decision，finish 转成一个 done Decision。不保存等待动作或停止原因的副本。
@@ -789,7 +827,7 @@ original_y = y + v * height / rendered_height
 5. finish 用 accept_finish_result(receipt) 追加结束确认，不新增图片或批次；随后结束当前 episode。两个 accept 方法都是普通 Python 方法，不是模型工具或图节点。
 6. 真实回执接回后，再判断环境成功、外层决策轮数耗尽等结束条件。继续时沿用刚取得的 obs_after；结束时保存 outcome。最后一批也要记结果，不能依赖下一次 decide 才补齐。
 
-正常路径示意，辅助函数均为拟实现的普通 Python 函数：
+正常路径的简化示意；回执构造和执行循环实际位于 `run_collect._run_vista_rounds()`，`accept_*` 方法位于 `brain.py`：
 
 ```python
 brain.begin_episode(ep_dir, task_text, tool_schemas)
@@ -902,7 +940,7 @@ messages 中已经有此前的全部上下文，以及：
 5. 在真正支持视觉和工具的模型端点上验证上述闭环；检查笔记工具的描述包含 scope 两种值的含义。区分模型自评与环境评分，确认模型输入没有混入持球真值或隐藏位置。
 6. 设置不同 max_model_calls 验证预算确实来自配置；缺失和非法值在启动时失败，第 N 次请求仍可交出动作，第 N+1 次不发送。图步数上限随之调整，SDK 无隐藏重试；图片索引不需要仿真时间。
 
-这些是后续实现的验收要求，**本次设计工作没有调用付费模型、运行新 VISTA brain 或宣称抓球任务已经成功**。
+上述消息配对、多工具、笔记、预算、批次、异常退出和输入隔离已纳入 `tests/test_vista.py`。测试也使用真实 MuJoCo 执行 `observe → forward`，验证批次结果与新图进入下一次模拟模型调用。**本次验证没有调用付费模型，也不声称真实模型已能成功抓球。**
 
 第一版仍有明确限制：消息会持续增长；进程崩溃后不自动恢复仿真；只采初始图和批次结束图；批内顺序执行，不支持物理并行；图片按 ID 和批次记录检索；笔记可能包含模型误判；控制成功不保证任务成功。它们不会阻止先验证上述基础闭环。
 
@@ -936,4 +974,4 @@ messages 中已经有此前的全部上下文，以及：
 
 你的《9.18 LangGraph》笔记第 5–7 页的 `StateGraph + model/tools + add_messages` 已足以理解这里的主循环。本文选择手动保留 State，所以暂不需要后面关于数据库、并行、流式或中断恢复的内容。
 
-旧讲义中写作 `brains/VISTA/...` 的本地路径现在统一对应 `brains/VISTA-docs/...`。原论文、译本和源码快照保留，资料入口的路径说明已更新；新 brain 的代码将在这个 `brains/vista/` 目录独立实现。
+旧讲义中写作 `brains/VISTA/...` 的本地路径现在统一对应 `brains/VISTA-docs/...`。原论文、译本和源码快照保留；新 brain 已在 `brains/vista/` 独立实现，原论文在新目录也保留一份副本。
