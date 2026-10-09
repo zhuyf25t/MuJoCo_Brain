@@ -477,6 +477,8 @@ def test_collector_waits_for_visual_final_even_if_environment_says_success(tmp_p
     from types import SimpleNamespace
     from brains.base import Decision
     import run_collect
+    # Isolate visual termination; physical settling has dedicated collector tests.
+    monkeypatch.setattr(run_collect.config, "EPISODE_SETTLE_SECONDS", 0.0)
 
     calls = []
     class Brain:

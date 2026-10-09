@@ -1,6 +1,7 @@
-# Optional LangGraph brain: python -m pip install -r requirements-langgraph.txt
+# Optional LangGraph / VISTA brains: python -m pip install -r requirements-langgraph.txt
 -r requirements.txt
 langgraph==1.2.12
+langchain-core==1.6.5
 # Typed capability results and per-module settings; experience uses ordinary JSON/PNG files.
 pydantic>=2.7,<3
 PyYAML>=6,<7

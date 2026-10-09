@@ -37,3 +37,7 @@ config.local.py
 Thumbs.db
 *.swp
 *.swo
+
+# Local VISTA reference archives
+/brains/vista-old/
+/brains/VISTA-docs/

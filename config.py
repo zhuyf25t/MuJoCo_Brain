@@ -63,6 +63,10 @@ SIM_DT = 0.002
 CTRL_HZ = 10
 CTRL_DT = 1.0 / CTRL_HZ
 
+# 正常结束决策后继续运行的仿真秒数，再评定结果；继续采集，不调用模型。
+# 保持臂/爪目标并停止底盘；按控制周期向上取整，0 禁用。异常、关窗和演示跳过。
+EPISODE_SETTLE_SECONDS = 3.0
+
 # ---- 动作原语 (低层时间盒控制) ----
 PRIM_V = 0.30          # forward/back 速度 (m/s)
 PRIM_W = 1.0           # turn_left/right 角速度 (rad/s)
@@ -73,7 +77,8 @@ ARM_NUDGE_MAX = 0.5    # shoulder/elbow 单次微调最大弧度
 ARM_STOW = [0.15, -0.6]      # 行驶收纳
 ARM_CARRY = [0.55, -1.1]     # 持球携带 (高位)
 ARM_REACH = [1.15, 1.46]     # 前伸抓取 (TCP≈前方0.55m, 离地0.11m)
-ARM_DROP = [1.97, -1.44]     # 投放 (TCP≈前方0.55m, 高0.50m, 越过箱壁)
+# 投放使用高肘分支：肘部约高0.64m，夹爪朝前下方；TCP仍≈前方0.55m、高0.50m。
+ARM_DROP = [0.48503, 1.44]
 
 # ---- 任务场景 ----
 BALL_NAMES = ["ball_0", "ball_1", "ball_2", "ball_3"]
@@ -102,7 +107,7 @@ RAND_PHYS = 0.2
 MAX_DECISIONS = 32
 LLM_TIMEOUT_S = 180.0   # 大 max_tokens 下思考链长, 单请求可能超 60s
 LLM_RETRIES = 3          # 超时/连接错/5xx 自动重试
-LLM_MAX_TOKENS = 8192    # 单次回复上限; 需覆盖 adaptive thinking 文本 + tool_use (2048 会截断)
+LLM_MAX_TOKENS = 65536   # 单次模型输出 token 上限；开启思考时需同时容纳 reasoning 和工具调用
 LLM_MAX_IMAGE_EDGE = 1024
 LLM_TERM_IMAGES = True      # 终端内联显示发给 LLM 的相机图 (需 Kitty 图形协议终端, 如 Ghostty)
 HISTORY_LINES = 12

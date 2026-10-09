@@ -113,13 +113,13 @@ class ArmDriver:
     # ---------- 关节微调 ----------
     def nudge(self, joint: str, delta: float,
               on_tick: TickCallback | None = None) -> tuple[bool, str]:
-        """joint: 'shoulder'|'elbow'; delta 正=抬起, 负=放下."""
+        """joint: 'shoulder'|'elbow'; delta 为关节角增量（弧度），不表示夹爪升降。"""
         delta = float(np.clip(delta, -config.ARM_NUDGE_MAX, config.ARM_NUDGE_MAX))
         q = self.r.arm_q.copy()
         i = 0 if joint == "shoulder" else 1
         q[i] += delta
         ok, msg = self.move_arm_q(q, on_tick=on_tick, timeout=3.0)
-        return ok, f"{joint} {'抬' if delta > 0 else '放'} {np.degrees(abs(delta)):.0f}°: {msg}"
+        return ok, f"{joint} 角度增量指令 {delta:+.2f} rad: {msg}"
 
     # ---------- 手指 ----------
     def open_gripper(self, on_tick: TickCallback | None = None) -> tuple[bool, str]:
