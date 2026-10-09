@@ -70,7 +70,9 @@ class VistaStorage:
             (episode / "frames").mkdir()
             (episode / "working.md").write_text(
                 "当前目标：根据任务和车头图制定计划。\n当前假设：待观察。\n"
-                "下一步：检查初始图。\n预期：待提出动作。\n等待检查的问题：暂无。\n相关帧编号：暂无。\n",
+                "下一步：检查初始图。\n预期：待提出动作。\n"
+                "未决疑点：暂无。每项记录待验证状态或矛盾、关联帧、阻塞的计划、下一检查和解决标准。\n"
+                "已解决疑点与直接证据：暂无。\n相关帧编号：暂无。\n",
                 encoding="utf-8")
             for name in ("frame_index", "actions", "calls", "messages"):
                 (episode / f"{name}.jsonl").touch(exist_ok=False)

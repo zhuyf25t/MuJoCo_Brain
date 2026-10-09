@@ -63,6 +63,10 @@ SIM_DT = 0.002
 CTRL_HZ = 10
 CTRL_DT = 1.0 / CTRL_HZ
 
+# 正常结束决策后继续运行的仿真秒数，再评定结果；继续采集，不调用模型。
+# 保持臂/爪目标并停止底盘；按控制周期向上取整，0 禁用。异常、关窗和演示跳过。
+EPISODE_SETTLE_SECONDS = 3.0
+
 # ---- 动作原语 (低层时间盒控制) ----
 PRIM_V = 0.30          # forward/back 速度 (m/s)
 PRIM_W = 1.0           # turn_left/right 角速度 (rad/s)

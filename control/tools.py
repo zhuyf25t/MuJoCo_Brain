@@ -112,11 +112,16 @@ class ToolLayer:
         add(Tool("arm_pose",
                  "臂到预设姿态: stow=行驶收纳 / carry=持球携带 / reach=前伸到地面抓取位 / drop=高位投放位",
                  {"pose": _p("stow|carry|reach|drop", ptype="string")}, ["pose"], arm_pose))
-        add(Tool("shoulder", "肩关节微调(弧度, 正=抬起, 负=放下)",
-                 {"delta": _p("弧度增量", mn=-config.ARM_NUDGE_MAX, mx=config.ARM_NUDGE_MAX)},
+        add(Tool("shoulder",
+                 "肩关节角度微调：零位时上臂向上，从零位向车头倾转为正向。夹爪升降取决于当前肩、肘姿态。",
+                 {"delta": _p("相对当前肩角的增量（弧度；正值增加、负值减少）",
+                              mn=-config.ARM_NUDGE_MAX, mx=config.ARM_NUDGE_MAX)},
                  ["delta"], shoulder))
-        add(Tool("elbow", "肘关节微调(弧度, 正=抬起, 负=放下)",
-                 {"delta": _p("弧度增量", mn=-config.ARM_NUDGE_MAX, mx=config.ARM_NUDGE_MAX)},
+        add(Tool("elbow",
+                 "肘关节角度微调：改变前臂相对上臂的角度，零位时两臂同向伸直，正向与肩关节相同。"
+                 "夹爪升降取决于当前肩、肘姿态。",
+                 {"delta": _p("相对当前肘角的增量（弧度；正值增加、负值减少）",
+                              mn=-config.ARM_NUDGE_MAX, mx=config.ARM_NUDGE_MAX)},
                  ["delta"], elbow))
         add(Tool("open_gripper", "张开手指(释放球)", {}, [], open_gripper))
         add(Tool("close_gripper", "闭合手指(抓球; 球在夹爪内则持有)", {}, [], close_gripper))

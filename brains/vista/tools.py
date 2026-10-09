@@ -116,6 +116,7 @@ def action_schemas(tool_schemas: list[dict]) -> dict[str, dict]:
                            + "；左右转不是横向平移。执行完会停止并稳定，用后续图片判断视觉效果。")
         elif name == "arm_pose":
             schema["properties"]["pose"]["enum"] = ["stow", "reach", "carry", "drop"]
+            description += "；只改变机械臂关节目标，不主动改变夹爪开合目标；姿态名称不证明当前是否持有物体。"
         elif name in ("shoulder", "elbow"):
             schema["properties"]["delta"].update(
                 minimum=-config.ARM_NUDGE_MAX, maximum=config.ARM_NUDGE_MAX)
@@ -135,7 +136,7 @@ def tool_schemas(settings: VistaSettings, actions: dict) -> list[dict]:
     region["description"] = coordinates
     view = {"label": _text("这张图在比较中的角色，例如批次前", settings.max_label_chars),
             "frame_id": _text("当前 episode 内已归档的原图编号，例如 f000000", 64), "region": region}
-    inspect_schema = _object({"question": _text("此次查图要确认的问题；原文保留在上下文中", settings.max_question_chars),
+    inspect_schema = _object({"question": _text("此次查图要直接看清的状态、关系或待解决疑点；原文保留在上下文中", settings.max_question_chars),
                               "views": {"type": "array", "minItems": 1, "maxItems": settings.max_views,
                                         "items": _object(view, ("label", "frame_id"))}}, ("question", "views"))
     pixel_view = {**deepcopy(view), "rows": _integer("均匀采样行数；至少 1，不能超过区域高度"),
@@ -168,7 +169,7 @@ def tool_schemas(settings: VistaSettings, actions: dict) -> list[dict]:
         ("play", "提交一批按数组顺序连续执行的动作，批内不再调用模型，结束后只反馈最终图。必须独占本条模型回复；expectation 是整批预期，不是成功证明。",
          _object({"actions": {"type": "array", "minItems": 1, "maxItems": settings.max_actions,
                                "items": {"oneOf": action_variants}},
-                  "expectation": _text("整批结束后预期看见的变化", settings.max_question_chars),
+                  "expectation": _text("整批结束后预期看见的变化；若用于验证，说明要直接看清什么、支持或否定假设的结果，以及何时仍无法判断", settings.max_question_chars),
                   "basis_frame_id": _text("必须等于当前观察的 frame_id，不能使用回看的旧图", 64)},
                  ("actions", "expectation", "basis_frame_id"))),
         ("finish", "提出结束当前 episode，success 仅为模型自评。独占一条回复，不执行动作、不新增图片或 play 批次。",
